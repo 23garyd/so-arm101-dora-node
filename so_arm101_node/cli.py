@@ -23,7 +23,7 @@ from so_arm101_node._envelope import CmdRequest
 from so_arm101_node.arm import ArmConfig, SoArm101
 from so_arm101_node.calibration import JOINTS, MotorCalibration
 from so_arm101_node.config import _parse_arms, default_calibration_path
-from so_arm101_node.motion import Limits
+from so_arm101_node.motion import Limits, check_target
 from so_arm101_node.node import NS, So101Controller
 from so_arm101_node.sim import SimulatedServos
 
@@ -159,16 +159,24 @@ def cmd_hello(args: argparse.Namespace) -> int:
     arms = _arms(args)
     if args.arm not in arms:
         raise SystemExit(f"unknown arm {args.arm}; have {sorted(arms)}")
+    arm = arms[args.arm]
     controller = So101Controller(arms, limits=Limits(max_speed_deg_s=args.speed), heartbeat_timeout_ms=0)
+    # Dry run reads only: preflight, calibration check and the limit check write nothing.
+    torque = arm.preflight()
+    if not args.sim:
+        arm.verify_calibration()
+    start = arm.read_joints()
+    target = start["wrist_flex"] + args.degrees
+    check_target({"wrist_flex": target}, arm.bounds(), controller.limits, controller.named_poses["rest"])
+    print(f"plan: arm {args.arm} wrist_flex {start['wrist_flex']:.1f}° → {target:.1f}° → back, "
+          f"≤ {args.speed:.0f}°/s; target inside limits; abort with Ctrl-C (holds pose)")
+    if not args.go:
+        state = "on" if any(torque.values()) else "off"
+        print(f"dry run: read only, nothing written or moved (torque {state}). "
+              "Clear the workspace, then repeat with --go.")
+        return 0
     for warning in controller.bring_up(write_calibration=args.sim):
         print("warning:", warning)
-    start = arms[args.arm].read_joints()
-    target = start["wrist_flex"] + args.degrees
-    print(f"plan: arm {args.arm} wrist_flex {start['wrist_flex']:.1f}° → {target:.1f}° → back, "
-          f"≤ {args.speed:.0f}°/s; abort with Ctrl-C (holds pose)")
-    if not args.go:
-        print("dry run: nothing moved. Clear the workspace, then repeat with --go.")
-        return 0
 
     def run(verb: str, params: dict) -> dict:
         response = controller.handle(CmdRequest(verb, verb, {"arm": args.arm, **params}, None, "1.0.0", None))

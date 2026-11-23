@@ -124,3 +124,23 @@ def test_calibration_falls_back_to_the_older_lerobot_layout(tmp_path):
     new.parent.mkdir(parents=True)
     new.write_text("{}")
     assert from_env({"ROBOT_ID": "bench", "HF_LEROBOT_CALIBRATION": str(tmp_path)}).calibration["arm"] == new
+
+
+def test_hello_dry_run_writes_nothing(monkeypatch, capsys):
+    from so_arm101_node import cli
+    from so_arm101_node.sim import SimulatedServos
+
+    sims = []
+    real_init = SimulatedServos.__init__
+
+    def track(self, *a, **kw):
+        real_init(self, *a, **kw)
+        sims.append(self)
+
+    monkeypatch.setattr(SimulatedServos, "__init__", track)
+    assert cli.main(["--sim", "hello", "--arm", "arm"]) == 0
+    # The sim arm is calibrated by writing EEPROM first; everything after that must be reads.
+    calibration_writes = {(i, a) for i in range(1, 7) for a in (9, 11, 31, 40, 55)}
+    extra = [w for w in sims[0].writes if (w[0], w[1]) not in calibration_writes]
+    assert extra == []
+    assert "dry run: read only" in capsys.readouterr().out
