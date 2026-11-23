@@ -23,7 +23,7 @@ from so_arm101_node._envelope import CmdRequest
 from so_arm101_node.arm import ArmConfig, SoArm101
 from so_arm101_node.calibration import JOINTS, MotorCalibration
 from so_arm101_node.config import _parse_arms, default_calibration_path
-from so_arm101_node.motion import Limits, check_target
+from so_arm101_node.motion import DEFAULT_TCP_FLOOR_M, Limits, check_target, check_tcp_floor
 from so_arm101_node.node import NS, So101Controller
 from so_arm101_node.sim import SimulatedServos
 
@@ -173,10 +173,14 @@ def cmd_hello(args: argparse.Namespace) -> int:
     torque = arm.preflight()
     if not args.sim:
         arm.verify_calibration()
-    start = arm.read_joints()["wrist_flex"]
+    joints = arm.read_joints()
+    start = joints["wrist_flex"]
     step = abs(args.degrees)
     target = start - step if start >= 0 else start + step  # toward 0°, away from the nearer limit
     check_target({"wrist_flex": target}, arm.bounds(), controller.limits, controller.named_poses["rest"])
+    if args.tcp_floor is not None:
+        check_tcp_floor(joints, {"wrist_flex": target}, args.tcp_floor)
+    controller.tcp_floor_m = args.tcp_floor
     print(f"plan: arm {args.arm} wrist_flex {start:.1f}° → {target:.1f}° → back, "
           f"≤ {args.speed:.0f}°/s; target inside limits; abort with Ctrl-C (holds pose)")
     if not args.go:
@@ -250,6 +254,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--degrees", type=float, default=10.0)
     p.add_argument("--speed", type=float, default=20.0)
     p.add_argument("--go", action="store_true", help="really move the arm")
+    p.add_argument("--tcp-floor", type=lambda v: None if v == "none" else float(v), default=DEFAULT_TCP_FLOOR_M,
+                   help="refuse moves that take the gripper below this height in metres ('none' disables)")
     p.add_argument("--from", dest="start_deg", type=float,
                    help="wrist_flex reported by the dry run; --go refuses if the arm has moved since")
     p.set_defaults(func=cmd_hello)

@@ -46,6 +46,12 @@ plugin (rule R5):
   aborts the move with `TRACKING_ERROR`, holds, and emits a `tracking_error` safety event.
 - A **1 s heartbeat watchdog** (`HEARTBEAT_TIMEOUT_MS`) estops a moving arm if the
   bridge goes silent. The bridge reads the timeout from the advert and sends heartbeats itself.
+- A move whose gripper TCP would dip below **5 mm** above the base's mounting
+  surface (`TCP_Z_FLOOR_M`) anywhere along its path is refused before anything
+  moves. Forward kinematics uses the official SO-101 new-calibration URDF.
+  Staying level or rising is never refused, even from below the floor, and the
+  rest pose is always reachable. This checks the TCP only: the jaws and wrist can
+  still touch the table or the arm's own links, which the tracking guard catches.
 - Motion requires `enable_torque` first. Calibration in the servo EEPROM must match
   the calibration file, or the node refuses to start.
 
@@ -104,6 +110,7 @@ MCP clients connect to `http://127.0.0.1:8773/mcp` (see
 | `ESTOP_ACTION` | `hold` | `hold` or `torque_off` |
 | `MAX_SPEED_DEG_S` | `30` | Up to 90 |
 | `STATE_HZ` | `10` | `robot.state` rate |
+| `TCP_Z_FLOOR_M` | `0.005` | Lowest gripper TCP height in metres above the base's mounting surface; `none` disables. Measure the table height per rig |
 | `SO101_BASE` | `none` | Three-wheel omni base: `none`, `sim`, or `serial` (same bus as the arms) |
 | `BASE_IDS` | `13,14,15` | Wheel servo ids (left-front, back, right-front) |
 | `BASE_MAX_TICKS` | `600` | Wheel speed cap in ticks (≈ 0.046 m/s); the three wheels scale together |
@@ -165,9 +172,9 @@ the topic contract; `tests/test_aisle_contract.py` also runs every command throu
 AISLE's real budget-guard when AISLE is installed (`pip install --no-deps -e <aisle>`,
 Python 3.11+) and requires zero clamps across a workspace sweep.
 
-The node has no Cartesian check: a joint target that puts the gripper into the table
-is stopped by the guard in AISLE (and by the tracking guard on the real arm), and the
-move fails and holds. A forward-kinematics floor check is a planned addition.
+The node's TCP floor uses the same URDF chain as AISLE's budget-guard (identical to
+within 1 µm), so a target into the table is refused by the node before AISLE's guard
+has to clamp it.
 
 ## Development
 

@@ -16,6 +16,8 @@ Safety behaviour:
   (a collision or stall) aborts the move and holds.
 - A move that does not settle on its goal holds where it stopped (``NOT_REACHED``)
   instead of pushing on toward the goal.
+- A move whose gripper TCP would dip below the floor (``TCP_Z_FLOOR_M``, forward
+  kinematics on the official URDF) is refused before anything moves.
 """
 
 from __future__ import annotations
@@ -32,7 +34,16 @@ from so_arm101_node._envelope import CmdRequest, cmd_response
 from so_arm101_node.arm import Arm, ArmError
 from so_arm101_node.base import BaseError, OmniBase, wheel_ticks
 from so_arm101_node.calibration import BODY_JOINTS, GRIPPER, JOINTS
-from so_arm101_node.motion import DEFAULT_HOME, DEFAULT_REST, LimitError, Limits, Trajectory, check_target
+from so_arm101_node.motion import (
+    DEFAULT_HOME,
+    DEFAULT_REST,
+    DEFAULT_TCP_FLOOR_M,
+    LimitError,
+    Limits,
+    Trajectory,
+    check_target,
+    check_tcp_floor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +127,7 @@ class So101Controller:
         estop_action: str = "hold",
         base: OmniBase | None = None,
         base_command_timeout_s: float = 0.5,
+        tcp_floor_m: float | None = DEFAULT_TCP_FLOOR_M,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if not arms:
@@ -125,6 +137,7 @@ class So101Controller:
         self.arms: dict[str, Arm] = dict(arms)
         self.base = base
         self.base_command_timeout_s = base_command_timeout_s
+        self.tcp_floor_m = tcp_floor_m
         self._base_cmd: _BaseCommand | None = None
         self.robot_id = robot_id
         self.limits = limits or Limits()
@@ -343,6 +356,8 @@ class So101Controller:
         arm = self.arms[name]
         check_target(target, arm.bounds(), self.limits, self.named_poses["rest"])
         start = arm.read_joints()
+        if self.tcp_floor_m is not None:
+            check_tcp_floor(start, target, self.tcp_floor_m, self.named_poses["rest"])
         now = self._clock()
         trajectory = Trajectory.plan(start, target, self.limits, now, speed)
         self._motions[name] = _Motion(request, trajectory, last_command=dict(start))
@@ -579,6 +594,7 @@ class So101Controller:
                 "max_speed_deg_s": self.limits.max_speed_deg_s,
                 "joint_margin_deg": self.limits.joint_margin_deg,
                 "max_tracking_error_deg": self.limits.max_tracking_error_deg,
+                "tcp_floor_m": self.tcp_floor_m,
             },
             "safety": {
                 "heartbeat_timeout_ms": self.heartbeat_timeout_ms,

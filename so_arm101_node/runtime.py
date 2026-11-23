@@ -79,6 +79,7 @@ def build_controller(cfg: NodeConfig) -> tuple[So101Controller, _Buses]:
             rest=cfg.rest_pose or AISLE_HOME,
             heartbeat_timeout_ms=cfg.heartbeat_timeout_ms,
             estop_action="hold",
+            tcp_floor_m=cfg.tcp_floor_m,
         )
         return controller, buses
     all_sim = cfg.backend == "sim"
@@ -101,6 +102,7 @@ def build_controller(cfg: NodeConfig) -> tuple[So101Controller, _Buses]:
         arms,
         base=base,
         base_command_timeout_s=cfg.base_command_timeout_s,
+        tcp_floor_m=cfg.tcp_floor_m,
         robot_id=cfg.robot_id,
         limits=Limits(max_speed_deg_s=cfg.max_speed_deg_s),
         heartbeat_timeout_ms=cfg.heartbeat_timeout_ms,

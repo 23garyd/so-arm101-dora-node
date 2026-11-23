@@ -12,6 +12,7 @@ import math
 from dataclasses import dataclass, field
 
 from so_arm101_node.calibration import BODY_JOINTS, GRIPPER, JOINTS
+from so_arm101_node.kinematics import tcp_position
 
 # Rest pose from the SO-101 bring-up reference (degrees; gripper percent).
 DEFAULT_REST = {
@@ -71,6 +72,43 @@ def check_target(
         raise LimitError(
             f"{joint}: {value:.1f} is within {margin:.0f}° of the calibrated limit "
             f"[{lo:.1f}, {hi:.1f}]"
+        )
+
+
+DEFAULT_TCP_FLOOR_M = 0.005  # AISLE's workspace floor; set per rig after measuring the table
+TCP_FLOOR_TOLERANCE_M = 0.002
+
+
+def check_tcp_floor(
+    start: dict[str, float],
+    goal: dict[str, float],
+    floor_m: float,
+    rest: dict[str, float] | None = None,
+    samples: int = 24,
+) -> None:
+    """Reject a move whose gripper TCP would go below ``floor_m`` (metres, base frame).
+
+    The whole joint-space path is checked, not only the goal. A move never gets
+    refused for staying level or rising: when the arm already sits below the floor
+    the limit becomes its current height. A move to the rest pose may go down to
+    the rest pose's own height, since the operator measured it as safe.
+    """
+    full_goal = dict(start) | goal
+    start_z = tcp_position(start)[2]
+    limit = min(floor_m, start_z) - TCP_FLOOR_TOLERANCE_M
+    if rest is not None and all(abs(full_goal[j] - rest[j]) < 1e-6 for j in BODY_JOINTS):
+        limit = min(limit, tcp_position(rest)[2] - TCP_FLOOR_TOLERANCE_M)
+    lowest, at = start_z, 0.0
+    for i in range(1, samples + 1):
+        s = i / samples
+        z = tcp_position({j: start[j] + (full_goal[j] - start[j]) * s for j in BODY_JOINTS})[2]
+        if z < lowest:
+            lowest, at = z, s
+    if lowest < limit:
+        where = "at the goal" if at == 1.0 else f"{at:.0%} of the way"
+        raise LimitError(
+            f"the gripper would reach z = {lowest * 1000:.0f} mm {where}, below the "
+            f"{floor_m * 1000:.0f} mm floor (start {start_z * 1000:.0f} mm)"
         )
 
 

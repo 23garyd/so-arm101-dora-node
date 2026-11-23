@@ -97,13 +97,13 @@ def test_two_arms_need_an_arm_name(clock):
 def test_stalled_joint_trips_tracking_guard_and_holds(rig, clock):
     controller, sim = rig
     run(controller, clock, f"{NS}.enable_torque")
-    sim.block(2)  # shoulder_lift hits something
+    sim.block(1)  # shoulder_pan hits something (a pan keeps the gripper height)
     events = []
-    r = run(controller, clock, f"{NS}.move_to_joint_state", joints={"shoulder_lift": 60.0}, events=events)
+    r = run(controller, clock, f"{NS}.move_to_joint_state", joints={"shoulder_pan": 60.0}, events=events)
     assert r["code"] == "TRACKING_ERROR"
-    assert events and events[0]["kind"] == "tracking_error" and events[0]["joint"] == "shoulder_lift"
-    held = r["data"]["joints"]["shoulder_lift"]
-    assert sim.goal(2) == pytest.approx(2048 + held * 4095 / 360, abs=2)
+    assert events and events[0]["kind"] == "tracking_error" and events[0]["joint"] == "shoulder_pan"
+    held = r["data"]["joints"]["shoulder_pan"]
+    assert sim.goal(1) == pytest.approx(2048 + held * 4095 / 360, abs=2)
 
 
 def test_gripper_blocked_by_object_still_succeeds(rig, clock):
