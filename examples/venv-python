@@ -1,0 +1,7 @@
+#!/bin/bash
+# Run the venv's python by its symlink path so dora nodes see the venv's packages.
+# dora resolves `path: python` and symlinks before exec, which loses the venv. Point
+# SO101_VENV at the venv that has dora-rs 1.0.1, this package and octos-spec-bridge
+# (default: <repo>/.venv).
+here="$(cd "$(dirname "$0")" && pwd)"
+exec "${SO101_VENV:-$here/../.venv}/bin/python" "$@"

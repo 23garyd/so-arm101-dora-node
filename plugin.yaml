@@ -1,0 +1,24 @@
+id: so-arm101
+version: 0.1.0
+class_path: so_arm101_node.node:So101Controller
+entry_point: so_arm101_node.__main__:main
+spec_version: "1.0.0"
+vendor: lerobot
+model: so101
+inputs:
+  - cmd_request
+  - tick
+outputs:
+  - cmd_response
+  - capabilities
+  - state
+  - safety_event
+config:
+  SO101_BACKEND: serial          # or sim
+  SO101_PORT: /dev/ttyACM0
+  SO101_ARMS: "arm:1"            # Nano: "left:1,right:7" (base wheels 13-15 share the bus)
+  HEARTBEAT_TIMEOUT_MS: 1000
+  ESTOP_ACTION: hold             # or torque_off
+  MAX_SPEED_DEG_S: 30
+  STATE_HZ: 10
+restart_policy: on-failure

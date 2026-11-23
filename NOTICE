@@ -1,0 +1,18 @@
+so-arm101-dora-node
+Copyright 2026 dorarobotics
+
+This product includes or adapts work from the following projects, each licensed
+under the Apache License, Version 2.0:
+
+- Hugging Face LeRobot (https://github.com/huggingface/lerobot):
+  STS3215 control-table addresses, calibration file format, joint normalisation
+  (DEGREES and RANGE_0_100 modes) and SO-101 follower servo configuration.
+
+- Google DeepMind robotics Antigravity plugin
+  (https://github.com/google-deepmind/robotics-antigravity-plugin):
+  SO-101 safety defaults (speed, margin and rest-pose rules R1-R5, R16), the
+  reference rest pose, and the staged bring-up procedure in docs/bring-up.md.
+  Copyright 2026 Google LLC.
+
+Protocol handling also follows DoRobot Studio's native SO-101 capture driver and
+the feetech-omni-car octos plugin.

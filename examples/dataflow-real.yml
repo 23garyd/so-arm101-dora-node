@@ -1,0 +1,46 @@
+# Real SO-ARM101 arms on a Feetech bus (Nano: left 1-6, right 7-12; base wheels 13-15 share the line).
+#
+#   dora up && dora start examples/dataflow-real.yml --attach
+#   curl -s http://127.0.0.1:8773/tools | jq '.tools[].name'
+#
+# Both nodes run through ./venv-python: set SO101_VENV to a venv with dora-rs 1.0.1, this package and
+# octos-spec-bridge (octos-robot-skills/bridge) installed. ROBOT_ID must match on
+# both nodes: the bridge addresses cmd_requests (and heartbeats) to it.
+nodes:
+  - id: so101
+    path: ./venv-python
+    args: -m so_arm101_node
+    env:
+      ROBOT_ID: nano-arms
+      SO101_BACKEND: serial
+      SO101_PORT: /dev/ttyACM0
+      # LeRobot calibration files; default ~/.cache/huggingface/lerobot/calibration/robots/so101_follower/<ROBOT_ID>_<arm>.json
+      # SO101_CALIBRATION: "left=/path/left.json,right=/path/right.json"
+      SO101_ARMS: "left:1,right:7"
+      HEARTBEAT_TIMEOUT_MS: "1000"
+    inputs:
+      cmd_request: bridge/cmd_request
+      tick: dora/timer/millis/20
+    outputs:
+      - cmd_response
+      - capabilities
+      - state
+      - safety_event
+
+  - id: bridge
+    path: ./venv-python
+    args: -m octos_spec_bridge
+    env:
+      ROBOT_ID: nano-arms
+      HTTP_HOST: "127.0.0.1"
+      HTTP_PORT: "8773"
+      CMD_TIMEOUT_S: "30"
+      MAX_ALLOWED_TIER: safe_motion
+      OCTOS_MCP_ENABLED: "1"
+    inputs:
+      cmd_response: so101/cmd_response
+      capabilities: so101/capabilities
+      state: so101/state
+      safety_event: so101/safety_event
+    outputs:
+      - cmd_request
