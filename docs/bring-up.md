@@ -49,6 +49,12 @@ each joint by hand, and read about 0° at the middle pose.
 Put the arm in its rest pose and note the `read` output. Pass it to the node as
 `SO101_REST_POSE` if it differs from the reference rest pose.
 
+The node refuses moves that take the gripper TCP below `TCP_Z_FLOOR_M` (default
+5 mm above the bottom of the base). If the arm is mounted above or below the work
+surface, set the floor to the table's height in the base frame; Google's Stage 5
+table probe measures it. A folded rest pose can sit below the floor: moves that
+rise from it and moves back to rest are always allowed.
+
 ## Stage 3 — First motion
 
 ```bash

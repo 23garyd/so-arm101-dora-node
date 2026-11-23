@@ -31,6 +31,7 @@ class NodeConfig:
     base_config: BaseConfig = field(default_factory=BaseConfig)
     base_command_timeout_s: float = 0.5
     aisle_stale_s: float = 1.0
+    tcp_floor_m: float | None = 0.005
 
 
 def _parse_arms(spec: str) -> tuple[ArmConfig, ...]:
@@ -66,6 +67,11 @@ def _parse_rest(raw: str | None) -> dict[str, float] | None:
 # Current LeRobot keeps SO-100/101 follower calibration under robots/so_follower/;
 # releases up to 0.3 used robots/so101_follower/. Look in both, newest layout first.
 CALIBRATION_DIRS = ("so_follower", "so101_follower")
+
+
+def _parse_floor(raw: str) -> float | None:
+    """``TCP_Z_FLOOR_M``: metres above the base's mounting surface, or ``none`` to disable."""
+    return None if raw.strip().lower() == "none" else float(raw)
 
 
 def _calibration_base(env: Mapping[str, str]) -> Path:
@@ -128,4 +134,5 @@ def from_env(env: Mapping[str, str] | None = None) -> NodeConfig:
         base_config=base_config,
         base_command_timeout_s=float(env.get("BASE_COMMAND_TIMEOUT_S", "0.5")),
         aisle_stale_s=float(env.get("AISLE_STATE_STALE_S", "1.0")),
+        tcp_floor_m=_parse_floor(env.get("TCP_Z_FLOOR_M", "0.005")),
     )

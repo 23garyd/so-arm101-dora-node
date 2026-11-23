@@ -219,17 +219,15 @@ def test_every_command_passes_aisles_budget_guard_unclamped(rig):
     assert rig.scene.violations == []
 
 
-@pytest.mark.skipif(aisle_guard is None, reason="AISLE not installed")
-def test_a_move_into_the_table_fails_and_holds(rig):
-    """The node has no Cartesian check: AISLE's guard stops the TCP at the floor, and the
-    node must then report a failure and hold, never success."""
+def test_a_move_into_the_table_is_refused_before_reaching_aisle(rig):
+    """The node's forward-kinematics floor stops it before AISLE's guard has to."""
     rig.step()
     rig.call(f"{NS}.enable_torque")
+    sent = rig.scene.commands
     r = rig.call(f"{NS}.move_to_joint_state", joints={"shoulder_lift": 60.0, "elbow_flex": 30.0})
-    assert not r["ok"] and r["code"] in ("TRACKING_ERROR", "NOT_REACHED")
-    assert any(v.get("reason") == "workspace" for v in rig.scene.violations)
-    events = [v["payload"]["kind"] for o, v in rig.out if o == "safety_event"]
-    assert events and events[-1] in ("tracking_error", "not_reached")
+    assert r["code"] == "LIMIT_VIOLATION" and "floor" in r["msg"]
+    assert rig.scene.commands == sent
+    assert rig.scene.violations == []
 
 
 def test_config_accepts_the_aisle_backend():
