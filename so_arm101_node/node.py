@@ -23,13 +23,13 @@ from __future__ import annotations
 import logging
 import math
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from so_arm101_node import feetech as ft
 from so_arm101_node._envelope import CmdRequest, cmd_response
-from so_arm101_node.arm import ArmError, SoArm101
+from so_arm101_node.arm import Arm, ArmError
 from so_arm101_node.base import BaseError, OmniBase, wheel_ticks
 from so_arm101_node.calibration import BODY_JOINTS, GRIPPER, JOINTS
 from so_arm101_node.motion import DEFAULT_HOME, DEFAULT_REST, LimitError, Limits, Trajectory, check_target
@@ -106,7 +106,7 @@ class _Refusal(Exception):
 class So101Controller:
     def __init__(
         self,
-        arms: dict[str, SoArm101],
+        arms: Mapping[str, Arm],
         *,
         robot_id: str = "so101",
         limits: Limits | None = None,
@@ -122,7 +122,7 @@ class So101Controller:
             raise ValueError("at least one arm is required")
         if estop_action not in ("hold", "torque_off"):
             raise ValueError("estop_action must be 'hold' or 'torque_off'")
-        self.arms = arms
+        self.arms: dict[str, Arm] = dict(arms)
         self.base = base
         self.base_command_timeout_s = base_command_timeout_s
         self._base_cmd: _BaseCommand | None = None
@@ -512,6 +512,20 @@ class So101Controller:
                 logger.exception("base: stop during estop failed")
             events.append({"kind": kind, "part": "base", "reason": reason, "action": "stop"})
         return events
+
+    def on_reset(self, reason: str = "episode reset") -> None:
+        """An external reset moved the robot (e.g. AISLE teleported home): end moves in flight."""
+        for name in list(self._motions):
+            motion = self._motions.pop(name)
+            self._cancelled.append(cmd_response(motion.request, ok=False, code="PREEMPTED", msg=reason))
+        for name, arm in self.arms.items():
+            hook = getattr(arm, "on_reset", None)
+            if callable(hook):
+                hook()
+            try:
+                self._last_joints[name] = arm.read_joints()
+            except (ArmError, ft.FeetechError):
+                logger.warning("arm %s: no fresh state after reset", name)
 
     def take_request_events(self) -> list[dict[str, Any]]:
         """Safety events raised while handling a request (e.g. robot.estop)."""

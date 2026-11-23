@@ -17,7 +17,7 @@ dependencies = [
 # __main__.py imports dora lazily, so the tests and the bring-up CLI run without it.
 # On aarch64 / CPython 3.10 install the vendored wheel from octos-robot-skills first.
 runtime = ["dora-rs>=1.0.1,<1.2"]
-dev = ["pytest>=8", "ruff>=0.15,<0.16", "mypy>=1.10,<3"]
+dev = ["pytest>=8", "ruff>=0.15,<0.16", "mypy>=1.10,<3", "numpy>=1.24"]
 
 [project.scripts]
 so-arm101-dora-node = "so_arm101_node.__main__:main"

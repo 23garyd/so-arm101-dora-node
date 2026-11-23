@@ -1,0 +1,51 @@
+# The aisle backend against a stand-in AISLE scene, behind the octos bridge.
+# In AISLE itself, replace `scene` with its SO-101 sim node and route joint_cmd /
+# gripper_cmd through budget-guard (joint_cmd_safe / gripper_cmd_safe).
+#
+#   SO101_VENV=/path/to/venv dora run examples/dataflow-aisle-stub.yml
+nodes:
+  - id: scene
+    path: ./venv-python
+    args: aisle_scene_stub.py
+    inputs:
+      tick: dora/timer/millis/10
+      joint_cmd: so101/joint_cmd
+      gripper_cmd: so101/gripper_cmd
+    outputs:
+      - joint_state
+
+  - id: so101
+    path: ./venv-python
+    args: -m so_arm101_node
+    env:
+      ROBOT_ID: so101-aisle
+      SO101_BACKEND: aisle
+      HEARTBEAT_TIMEOUT_MS: "1000"
+    inputs:
+      cmd_request: bridge/cmd_request
+      tick: dora/timer/millis/20
+      joint_state: scene/joint_state
+    outputs:
+      - cmd_response
+      - capabilities
+      - state
+      - safety_event
+      - joint_cmd
+      - gripper_cmd
+
+  - id: bridge
+    path: ./venv-python
+    args: -m octos_spec_bridge
+    env:
+      ROBOT_ID: so101-aisle
+      HTTP_HOST: "127.0.0.1"
+      HTTP_PORT: "8774"
+      CMD_TIMEOUT_S: "30"
+      MAX_ALLOWED_TIER: safe_motion
+    inputs:
+      cmd_response: so101/cmd_response
+      capabilities: so101/capabilities
+      state: so101/state
+      safety_event: so101/safety_event
+    outputs:
+      - cmd_request
