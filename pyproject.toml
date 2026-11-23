@@ -12,10 +12,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Pinned to the dora 1.0.1 release used by octos-robot-skills. Not a hard dependency:
+# Tested on dora 1.0.1 (octos-robot-skills, Studio) and 1.1.0 (dorobot2). The dora CLI and
+# dora-rs must be the same release on one host. Not a hard dependency:
 # __main__.py imports dora lazily, so the tests and the bring-up CLI run without it.
 # On aarch64 / CPython 3.10 install the vendored wheel from octos-robot-skills first.
-runtime = ["dora-rs==1.0.1"]
+runtime = ["dora-rs>=1.0.1,<1.2"]
 dev = ["pytest>=8", "ruff>=0.15,<0.16", "mypy>=1.10,<3"]
 
 [project.scripts]
