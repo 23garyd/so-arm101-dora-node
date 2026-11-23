@@ -21,14 +21,16 @@ Safety behaviour:
 from __future__ import annotations
 
 import logging
+import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from typing import Any
 
 from so_arm101_node import feetech as ft
 from so_arm101_node._envelope import CmdRequest, cmd_response
 from so_arm101_node.arm import ArmError, SoArm101
+from so_arm101_node.base import BaseError, OmniBase, wheel_ticks
 from so_arm101_node.calibration import BODY_JOINTS, GRIPPER, JOINTS
 from so_arm101_node.motion import DEFAULT_HOME, DEFAULT_REST, LimitError, Limits, Trajectory, check_target
 
@@ -54,6 +56,13 @@ VERB_TIERS: dict[str, str] = {
     f"{NS}.gripper.open": "safe_motion",
     f"{NS}.gripper.close": "safe_motion",
 }
+BASE_NS = "vendor.dora_nav.base"
+BASE_VERB_TIERS: dict[str, str] = {
+    f"{BASE_NS}.set_velocity": "safe_motion",
+    f"{BASE_NS}.stop": "emergency_override",
+}
+MAX_BASE_DURATION_S = 10.0
+
 MOTION_VERBS = frozenset({
     f"{NS}.move_to_joint_state", f"{NS}.move_to_named",
     f"{NS}.gripper.set", f"{NS}.gripper.open", f"{NS}.gripper.close",
@@ -71,6 +80,14 @@ class _Motion:
     trajectory: Trajectory
     last_command: dict[str, float]
     settling_since: float | None = None
+
+
+@dataclass
+class _BaseCommand:
+    velocity: tuple[float, float, float]
+    ticks: tuple[int, int, int]
+    expires_at: float
+    request: CmdRequest | None  # set when the caller asked for a fixed duration
 
 
 @dataclass
@@ -97,6 +114,8 @@ class So101Controller:
         home: dict[str, float] | None = None,
         heartbeat_timeout_ms: int = 1000,
         estop_action: str = "hold",
+        base: OmniBase | None = None,
+        base_command_timeout_s: float = 0.5,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if not arms:
@@ -104,6 +123,9 @@ class So101Controller:
         if estop_action not in ("hold", "torque_off"):
             raise ValueError("estop_action must be 'hold' or 'torque_off'")
         self.arms = arms
+        self.base = base
+        self.base_command_timeout_s = base_command_timeout_s
+        self._base_cmd: _BaseCommand | None = None
         self.robot_id = robot_id
         self.limits = limits or Limits()
         self.named_poses = {"rest": dict(rest or DEFAULT_REST), "home": dict(home or DEFAULT_HOME)}
@@ -112,6 +134,7 @@ class So101Controller:
         self._clock = clock
         self._motions: dict[str, _Motion] = {}
         self._cancelled: list[dict[str, Any]] = []
+        self._request_events: list[dict[str, Any]] = []
         self._torque: dict[str, bool] = {name: False for name in arms}
         self._last_joints: dict[str, dict[str, float]] = {}
         self._last_beat = clock()
@@ -133,18 +156,28 @@ class So101Controller:
             f"{NS}.gripper.open": lambda r: self._gripper_to(r, GRIPPER_OPEN),
             f"{NS}.gripper.close": lambda r: self._gripper_to(r, GRIPPER_CLOSED),
         }
-        assert set(self._handlers) == set(VERB_TIERS)
+        self.verb_tiers = dict(VERB_TIERS)
+        if base is not None:
+            self._handlers[f"{BASE_NS}.set_velocity"] = self._base_set_velocity
+            self._handlers[f"{BASE_NS}.stop"] = self._base_stop
+            self.verb_tiers |= BASE_VERB_TIERS
+        assert set(self._handlers) == set(self.verb_tiers)
 
     # =================================================================
     # Startup
     # =================================================================
 
-    def bring_up(self, *, write_calibration: bool = False) -> list[str]:
-        """Preflight every arm; configure the ones that are limp. Returns warnings."""
+    def bring_up(self, *, write_calibration: bool | Collection[str] = False) -> list[str]:
+        """Preflight every arm (and the base); configure the ones that are limp. Returns warnings.
+
+        ``write_calibration``: True for every arm, or the names of the arms whose
+        calibration is written to EEPROM (simulated arms); the others are verified.
+        """
         warnings = []
+        writes = set(self.arms) if write_calibration is True else set(write_calibration or ())
         for name, arm in self.arms.items():
             torque = arm.preflight()
-            if write_calibration:
+            if name in writes:
                 if any(torque.values()):
                     raise ArmError(f"arm {name}: refuse to write calibration with torque on")
                 arm.write_calibration()
@@ -156,6 +189,9 @@ class So101Controller:
             else:
                 arm.configure()
             self._last_joints[name] = arm.read_joints()
+        if self.base is not None:
+            self.base.preflight()
+            self.base.configure()
         return warnings
 
     # =================================================================
@@ -174,7 +210,7 @@ class So101Controller:
             return cmd_response(request, ok=False, code=e.code, msg=e.msg)
         except LimitError as e:
             return cmd_response(request, ok=False, code="LIMIT_VIOLATION", msg=str(e))
-        except (ArmError, ft.FeetechError) as e:
+        except (ArmError, BaseError, ft.FeetechError) as e:
             logger.exception("hardware error on %s", request.verb)
             return cmd_response(request, ok=False, code="HARDWARE_ERROR", msg=str(e))
 
@@ -205,6 +241,7 @@ class So101Controller:
     def _estop(self, request: CmdRequest) -> dict[str, Any]:
         reason = str(request.params.get("reason", "estop"))
         events = self._engage_estop(reason, kind="estop_engaged")
+        self._request_events += events
         return self._ok(request, {"action": self.estop_action, "events": len(events)})
 
     def _clear_estop(self, request: CmdRequest) -> dict[str, Any]:
@@ -249,6 +286,48 @@ class So101Controller:
             self.arms[name].disable_torque()
             self._torque[name] = False
         return self._ok(request, {"limp": names})
+
+    def _base_set_velocity(self, request: CmdRequest) -> dict[str, Any] | None:
+        """Body velocity in m/s, m/s, rad/s. Without ``duration_s`` it lapses after the
+        command timeout unless repeated (a deadman); with it, the reply comes when done."""
+        self._refuse_if_estopped()
+        assert self.base is not None
+        try:
+            vx, vy, omega = (float(request.params.get(k, 0.0)) for k in ("vx", "vy", "omega"))
+            duration = request.params.get("duration_s")
+            duration = None if duration is None else float(duration)
+        except (TypeError, ValueError) as e:
+            raise _Refusal("INVALID_PARAMS", f"vx, vy, omega and duration_s must be numbers: {e}") from e
+        if not all(map(math.isfinite, (vx, vy, omega))):
+            raise _Refusal("INVALID_PARAMS", "vx, vy and omega must be finite")
+        if duration is not None and not 0 < duration <= MAX_BASE_DURATION_S:
+            raise _Refusal("INVALID_PARAMS", f"duration_s must be in (0, {MAX_BASE_DURATION_S}]")
+        self._finish_base_request("PREEMPTED", "replaced by a newer set_velocity")
+        if vx == vy == omega == 0.0:
+            self.base.stop()
+            self._base_cmd = None
+            return self._ok(request, {"ticks": [0, 0, 0]})
+        ticks = wheel_ticks(vx, vy, omega, self.base.config)
+        self.base.drive(ticks)
+        now = self._clock()
+        expires = now + (duration if duration is not None else self.base_command_timeout_s)
+        self._base_cmd = _BaseCommand((vx, vy, omega), ticks, expires, request if duration else None)
+        if duration is not None:
+            return None
+        return self._ok(request, {"ticks": list(ticks), "expires_in_s": self.base_command_timeout_s})
+
+    def _base_stop(self, request: CmdRequest) -> dict[str, Any]:
+        assert self.base is not None
+        self._finish_base_request("PREEMPTED", f"stopped by {BASE_NS}.stop")
+        self.base.stop()
+        self._base_cmd = None
+        return self._ok(request)
+
+    def _finish_base_request(self, code: str, msg: str) -> None:
+        """Answer a pending fixed-duration base request that is being cut short."""
+        if self._base_cmd is not None and self._base_cmd.request is not None:
+            self._cancelled.append(cmd_response(self._base_cmd.request, ok=False, code=code, msg=msg))
+            self._base_cmd.request = None
 
     def _refuse_if_estopped(self) -> None:
         if self.estopped:
@@ -315,6 +394,18 @@ class So101Controller:
         if self._watchdog_due(now):
             self._watchdog_fired = True
             result.safety_events += self._engage_estop("heartbeat lapsed during motion", kind="watchdog_timeout")
+        if self._base_cmd is not None and now >= self._base_cmd.expires_at:
+            command, self._base_cmd = self._base_cmd, None
+            try:
+                assert self.base is not None
+                self.base.stop()
+            except (BaseError, ft.FeetechError) as e:
+                logger.exception("base: stop after the command ended failed")
+                result.safety_events.append({"kind": "hardware_error", "part": "base", "detail": str(e)})
+            if command.request is not None:
+                result.responses.append(cmd_response(command.request, ok=True, code="0",
+                                                     data={"velocity": list(command.velocity),
+                                                           "ticks": list(command.ticks)}))
         for name in list(self._motions):
             try:
                 self._advance(name, now, result)
@@ -327,7 +418,8 @@ class So101Controller:
         return result
 
     def _watchdog_due(self, now: float) -> bool:
-        if self.heartbeat_timeout_ms <= 0 or self._watchdog_fired or not self._motions:
+        moving = bool(self._motions) or self._base_cmd is not None
+        if self.heartbeat_timeout_ms <= 0 or self._watchdog_fired or not moving:
             return False
         return (now - self._last_beat) * 1000 > self.heartbeat_timeout_ms
 
@@ -411,7 +503,20 @@ class So101Controller:
                 except ArmError:
                     logger.exception("arm %s: torque off during estop failed", name)
             events.append({"kind": kind, "arm": name, "reason": reason, "action": self.estop_action})
+        if self.base is not None:
+            self._finish_base_request("ESTOPPED", f"estop: {reason}")
+            self._base_cmd = None
+            try:
+                self.base.stop()
+            except BaseError:
+                logger.exception("base: stop during estop failed")
+            events.append({"kind": kind, "part": "base", "reason": reason, "action": "stop"})
         return events
+
+    def take_request_events(self) -> list[dict[str, Any]]:
+        """Safety events raised while handling a request (e.g. robot.estop)."""
+        out, self._request_events = self._request_events, []
+        return out
 
     def take_cancelled_responses(self) -> list[dict[str, Any]]:
         """Responses for motions cancelled by a request (estop/stop); send them after its reply."""
@@ -435,7 +540,13 @@ class So101Controller:
                 "torque": self._torque[name],
                 "moving": name in self._motions,
             }
-        return {"arms": arms, "estopped": self.estopped, "estop_reason": self.estop_reason}
+        state: dict[str, Any] = {"arms": arms, "estopped": self.estopped, "estop_reason": self.estop_reason}
+        if self.base is not None:
+            cmd = self._base_cmd
+            state["base"] = {"moving": cmd is not None,
+                             "velocity": list(cmd.velocity) if cmd else [0.0, 0.0, 0.0],
+                             "ticks": list(self.base.last_ticks), "odometry": None}
+        return state
 
     def capabilities_advert(self) -> dict[str, Any]:
         return {
@@ -460,7 +571,15 @@ class So101Controller:
                 "estop_action": self.estop_action,
                 "watchdog_action": self.estop_action,
             },
-            "commands": [{"verb": v, "safety_tier": t} for v, t in VERB_TIERS.items()],
+            "base": None if self.base is None else {
+                "wheel_ids": list(self.base.config.ids),
+                "max_linear_m_s": round(self.base.config.max_linear_m_s, 4),
+                "radius_m": self.base.config.radius_m,
+                "command_timeout_s": self.base_command_timeout_s,
+                "max_duration_s": MAX_BASE_DURATION_S,
+                "odometry": False,
+            },
+            "commands": [{"verb": v, "safety_tier": t} for v, t in self.verb_tiers.items()],
             "streams": [
                 {"name": "robot.state", "schema": "vendor.lerobot.so101.state.v1"},
                 {"name": "robot.safety_event", "schema": "robot.safety_event.v1", "rate_hz": "on-event"},

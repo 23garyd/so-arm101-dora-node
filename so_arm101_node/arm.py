@@ -23,14 +23,15 @@ class ArmError(RuntimeError):
 class ArmConfig:
     name: str
     ids: tuple[int, ...]  # servo ids in JOINTS order
+    sim: bool = False  # simulated servos even when the node runs on a real bus
 
     def __post_init__(self) -> None:
         if len(self.ids) != len(JOINTS) or len(set(self.ids)) != len(JOINTS):
             raise ValueError(f"arm {self.name}: needs {len(JOINTS)} distinct servo ids")
 
     @classmethod
-    def from_first_id(cls, name: str, first_id: int) -> ArmConfig:
-        return cls(name, tuple(range(first_id, first_id + len(JOINTS))))
+    def from_first_id(cls, name: str, first_id: int, sim: bool = False) -> ArmConfig:
+        return cls(name, tuple(range(first_id, first_id + len(JOINTS))), sim)
 
 
 class SoArm101:

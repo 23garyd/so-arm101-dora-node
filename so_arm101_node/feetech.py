@@ -44,6 +44,7 @@ OVERLOAD_TORQUE = (36, 1)
 TORQUE_ENABLE = (40, 1)
 ACCELERATION = (41, 1)
 GOAL_POSITION = (42, 2)
+GOAL_SPEED = (46, 2)  # wheel mode: sign-magnitude, bit 15 = reverse
 LOCK = (55, 1)
 PRESENT_POSITION = (56, 2)
 PRESENT_LOAD = (60, 2)

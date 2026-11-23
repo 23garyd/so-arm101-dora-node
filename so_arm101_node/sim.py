@@ -85,6 +85,13 @@ class SimulatedServos:
     def goal(self, servo_id: int) -> int:
         return self.servos[servo_id].get(ft.GOAL_POSITION)
 
+    def wheel_speed(self, servo_id: int) -> int:
+        """Signed commanded wheel speed in ticks (0 unless in wheel mode with torque on)."""
+        servo = self.servos[servo_id]
+        if servo.get(ft.OPERATING_MODE) != 1 or not servo.get(ft.TORQUE_ENABLE):
+            return 0
+        return ft.decode_sign_magnitude(servo.get(ft.GOAL_SPEED), 15)
+
     def advance(self) -> None:
         now = self._clock()
         dt = max(0.0, now - self._last)
@@ -92,6 +99,9 @@ class SimulatedServos:
         step = self.slew * dt
         for servo in self.servos.values():
             if not servo.get(ft.TORQUE_ENABLE):
+                continue
+            if servo.get(ft.OPERATING_MODE) == 1:  # wheel mode: spin at the goal speed
+                servo.encoder = (servo.encoder + ft.decode_sign_magnitude(servo.get(ft.GOAL_SPEED), 15) * dt) % 4096
                 continue
             target_encoder: float = servo.get(ft.GOAL_POSITION) + servo.homing_offset()
             if servo.blocked_at is not None:
