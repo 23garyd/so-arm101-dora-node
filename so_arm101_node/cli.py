@@ -154,8 +154,16 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     return 0
 
 
+FROM_TOLERANCE_DEG = 3.0
+
+
 def cmd_hello(args: argparse.Namespace) -> int:
-    """Nudge wrist_flex by --degrees and back, at --speed. Dry run unless --go."""
+    """Nod wrist_flex by --degrees toward the middle of its range and back. Dry run unless --go.
+
+    The dry run prints the exact ``--go --from`` command. ``--go`` refuses to move when
+    the wrist is no longer where the dry run saw it, so the move that runs is the one
+    the operator approved.
+    """
     arms = _arms(args)
     if args.arm not in arms:
         raise SystemExit(f"unknown arm {args.arm}; have {sorted(arms)}")
@@ -165,16 +173,24 @@ def cmd_hello(args: argparse.Namespace) -> int:
     torque = arm.preflight()
     if not args.sim:
         arm.verify_calibration()
-    start = arm.read_joints()
-    target = start["wrist_flex"] + args.degrees
+    start = arm.read_joints()["wrist_flex"]
+    step = abs(args.degrees)
+    target = start - step if start >= 0 else start + step  # toward 0°, away from the nearer limit
     check_target({"wrist_flex": target}, arm.bounds(), controller.limits, controller.named_poses["rest"])
-    print(f"plan: arm {args.arm} wrist_flex {start['wrist_flex']:.1f}° → {target:.1f}° → back, "
+    print(f"plan: arm {args.arm} wrist_flex {start:.1f}° → {target:.1f}° → back, "
           f"≤ {args.speed:.0f}°/s; target inside limits; abort with Ctrl-C (holds pose)")
     if not args.go:
         state = "on" if any(torque.values()) else "off"
-        print(f"dry run: read only, nothing written or moved (torque {state}). "
-              "Clear the workspace, then repeat with --go.")
+        print(f"dry run: read only, nothing written or moved (torque {state}).")
+        print(f"Clear the workspace, then run the same command with: --go --from {start:.1f}")
         return 0
+    if args.start_deg is None:
+        raise SystemExit("--go needs --from <wrist_flex from the dry run>; run the dry run first")
+    if abs(start - args.start_deg) > FROM_TOLERANCE_DEG:
+        raise SystemExit(
+            f"refusing to move: wrist_flex is {start:.1f}°, the dry run saw {args.start_deg:.1f}°. "
+            "The arm moved since the dry run; run the dry run again."
+        )
     for warning in controller.bring_up(write_calibration=args.sim):
         print("warning:", warning)
 
@@ -185,13 +201,16 @@ def cmd_hello(args: argparse.Namespace) -> int:
             done = controller.tick().responses
             response = done[0] if done else None
         if not response["ok"]:
-            raise SystemExit(f"{verb}: {response['code']} {response['msg']}")
+            print(f"{verb}: {response['code']} {response['msg']}")
+            print("stopped: torque is on and holds where the arm stopped. "
+                  "Check the arm, then use torque-off with the arm supported or at rest.")
+            raise SystemExit(1)
         return response
 
     try:
         run(f"{NS}.enable_torque", {})
         run(f"{NS}.move_to_joint_state", {"joints": {"wrist_flex": target}})
-        run(f"{NS}.move_to_joint_state", {"joints": {"wrist_flex": start["wrist_flex"]}})
+        run(f"{NS}.move_to_joint_state", {"joints": {"wrist_flex": start}})
     except KeyboardInterrupt:
         controller.handle(CmdRequest("abort", "robot.estop", {"reason": "operator abort"}, None, "1.0.0", None))
         print("aborted: holding the current pose")
@@ -225,12 +244,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", help="calibration JSON path (default: LeRobot cache)")
     p.set_defaults(func=cmd_calibrate)
 
-    p = sub.add_parser("hello", help="small wrist nod to check motion (dry run unless --go)")
+    p = sub.add_parser("hello", help="small wrist nod toward mid-range (dry run unless --go --from)")
     p.add_argument("--arms", default="arm:1")
     p.add_argument("--arm", default="arm")
     p.add_argument("--degrees", type=float, default=10.0)
     p.add_argument("--speed", type=float, default=20.0)
     p.add_argument("--go", action="store_true", help="really move the arm")
+    p.add_argument("--from", dest="start_deg", type=float,
+                   help="wrist_flex reported by the dry run; --go refuses if the arm has moved since")
     p.set_defaults(func=cmd_hello)
 
     args = parser.parse_args(argv)

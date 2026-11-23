@@ -144,3 +144,16 @@ def test_hello_dry_run_writes_nothing(monkeypatch, capsys):
     extra = [w for w in sims[0].writes if (w[0], w[1]) not in calibration_writes]
     assert extra == []
     assert "dry run: read only" in capsys.readouterr().out
+
+
+def test_hello_go_requires_the_dry_run_start(capsys):
+    from so_arm101_node import cli
+
+    with pytest.raises(SystemExit, match="needs --from"):
+        cli.main(["--sim", "hello", "--arm", "arm", "--go"])
+    with pytest.raises(SystemExit, match="refusing to move"):
+        cli.main(["--sim", "hello", "--arm", "arm", "--go", "--from", "40"])
+    assert cli.main(["--sim", "hello", "--arm", "arm", "--speed", "60"]) == 0
+    assert "--go --from 0.0" in capsys.readouterr().out
+    assert cli.main(["--sim", "hello", "--arm", "arm", "--go", "--from", "0.0", "--speed", "60"]) == 0
+    assert "done:" in capsys.readouterr().out

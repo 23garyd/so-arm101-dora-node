@@ -219,3 +219,17 @@ def test_advert_lists_every_verb_with_a_tier(rig):
     assert set(verbs.values()) <= {"observe", "safe_motion", "full_actuation", "emergency_override"}
     r = controller.handle(req("vendor.nope"))
     assert r["code"] == "INVALID_PARAMS"
+
+
+def test_not_reached_holds_where_the_joint_stopped(rig, clock):
+    """A joint blocked close to its goal (lag below the tracking limit) must stop pushing."""
+    controller, sim = rig
+    run(controller, clock, f"{NS}.enable_torque")
+    start_encoder = sim.servos[4].encoder
+    sim.block(4, start_encoder + 4 * 4095 / 360)  # stops 4° along a 10° move
+    events = []
+    r = run(controller, clock, f"{NS}.move_to_joint_state", joints={"wrist_flex": 10.0}, events=events)
+    assert r["code"] == "NOT_REACHED" and "holding" in r["msg"]
+    assert any(e["kind"] == "not_reached" for e in events)
+    present_raw = sim.servos[4].present()
+    assert abs(sim.goal(4) - present_raw) <= 2  # goal pulled back to where it stopped
