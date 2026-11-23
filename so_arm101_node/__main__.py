@@ -16,7 +16,7 @@ def main() -> None:
     from dora import Node  # lazy: tests and the CLI run without dora
 
     dora_node = Node()
-    pump = Pump(controller, dora_node.send_output, state_hz=cfg.state_hz)
+    pump = Pump(controller, dora_node.send_output, state_hz=cfg.state_hz, aisle=bus.aisle)
     pump.on_tick()  # publish the capabilities advert and a first state right away
     try:
         for event in dora_node:

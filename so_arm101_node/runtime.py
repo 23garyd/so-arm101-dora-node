@@ -19,7 +19,8 @@ from so_arm101_node._envelope import (
     parse_cmd_request,
     stream_envelope,
 )
-from so_arm101_node.arm import SoArm101
+from so_arm101_node.aisle import AISLE_HOME, AisleArm, AisleLink
+from so_arm101_node.arm import Arm, SoArm101
 from so_arm101_node.base import OmniBase
 from so_arm101_node.config import NodeConfig
 from so_arm101_node.feetech import FeetechBus
@@ -42,6 +43,7 @@ class _Buses:
         self.cfg = cfg
         self.serial: FeetechBus | None = None
         self.sim: FeetechBus | None = None
+        self.aisle: AisleLink | None = None
 
     def get(self, simulated: bool, ids: list[int]) -> FeetechBus:
         if simulated:
@@ -61,9 +63,27 @@ class _Buses:
 
 
 def build_controller(cfg: NodeConfig) -> tuple[So101Controller, _Buses]:
+    """Build the arms (and base) for the configured backend.
+
+    Serial and sim controllers are brought up here. An AISLE controller is not: the
+    scene's first joint_state has to arrive first, so ``Pump`` brings it up then.
+    """
     buses = _Buses(cfg)
+    if cfg.backend == "aisle":
+        buses.aisle = AisleLink(stale_s=cfg.aisle_stale_s)
+        aisle_arms: dict[str, Arm] = {a.name: AisleArm(buses.aisle, a) for a in cfg.arms}
+        controller = So101Controller(
+            aisle_arms,
+            robot_id=cfg.robot_id,
+            limits=Limits(max_speed_deg_s=cfg.max_speed_deg_s),
+            rest=cfg.rest_pose or AISLE_HOME,
+            heartbeat_timeout_ms=cfg.heartbeat_timeout_ms,
+            estop_action="hold",
+        )
+        return controller, buses
     all_sim = cfg.backend == "sim"
-    arms, writes = {}, set()
+    arms: dict[str, Arm] = {}
+    writes = set()
     for arm in cfg.arms:
         simulated = all_sim or arm.sim
         if simulated:
@@ -105,8 +125,10 @@ class Pump:
     """Turns dora events into controller calls and controller results into dora outputs."""
 
     def __init__(self, controller: So101Controller, send: Any, *, state_hz: float,
-                 clock: Any = time.monotonic) -> None:
+                 clock: Any = time.monotonic, aisle: AisleLink | None = None) -> None:
         self.c = controller
+        self.aisle = aisle
+        self.ready = aisle is None  # an AISLE controller comes up on the first joint_state
         self._send_raw = send
         self._clock = clock
         self._state_period = 1.0 / max(state_hz, 0.1)
@@ -134,6 +156,10 @@ class Pump:
             return
         if request.target not in (None, self.c.robot_id):
             return  # addressed to another robot on the same dataflow
+        if not self.ready and request.verb not in ("robot.heartbeat", "robot.get_capabilities"):
+            self._send("cmd_response", cmd_response(request, ok=False, code="NOT_READY",
+                                                    msg="waiting for the first joint_state from AISLE"))
+            return
         response = self.c.handle(request)
         if response is not None:
             self._send("cmd_response", response)
@@ -141,8 +167,37 @@ class Pump:
             self._send("cmd_response", cancelled)
         for event in self.c.take_request_events():
             self._stream("safety_event", "robot.safety_event", "robot.safety_event.v1", event)
+        self._flush_aisle()
+
+    def _flush_aisle(self) -> None:
+        if self.aisle is None:
+            return
+        import pyarrow as pa  # lazy, as in _send
+
+        for output, values in self.aisle.take_outbox():
+            self._send_raw(output, pa.array(values, type=pa.float32()))
+
+    def on_joint_state(self, value: Any) -> None:
+        if self.aisle is None:
+            return
+        values = value.to_pylist() if hasattr(value, "to_pylist") else list(value)
+        self.aisle.update(values)
+        if not self.ready:
+            for warning in self.c.bring_up():
+                logger.warning(warning)
+            self.ready = True
+
+    def on_reset_done(self) -> None:
+        self.c.on_reset("AISLE episode reset")
+        for cancelled in self.c.take_cancelled_responses():
+            self._send("cmd_response", cancelled)
 
     def on_tick(self) -> None:
+        if not self.ready:
+            if self._clock() >= self._next_advert:  # still advertise while waiting for AISLE
+                self._next_advert = self._clock() + ADVERT_STARTUP_PERIOD_S
+                self._send("capabilities", self.c.capabilities_advert())
+            return
         result = self.c.tick()
         for response in result.responses:
             self._send("cmd_response", response)
@@ -156,6 +211,7 @@ class Pump:
             early = now - self._started < ADVERT_STARTUP_WINDOW_S
             self._next_advert = now + (ADVERT_STARTUP_PERIOD_S if early else ADVERT_PERIOD_S)
             self._send("capabilities", self.c.capabilities_advert())
+        self._flush_aisle()
 
     def on_event(self, event: Any) -> bool:
         """Handle one dora event; return False when the dataflow is stopping."""
@@ -168,4 +224,8 @@ class Pump:
             self.on_request(decode(event["value"]))
         elif event["id"] == "tick":
             self.on_tick()
+        elif event["id"] == "joint_state":
+            self.on_joint_state(event["value"])
+        elif event["id"] == "reset_done":
+            self.on_reset_done()
         return True

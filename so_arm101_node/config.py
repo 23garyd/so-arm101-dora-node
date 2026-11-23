@@ -16,7 +16,7 @@ from so_arm101_node.calibration import JOINTS
 @dataclass(frozen=True)
 class NodeConfig:
     robot_id: str
-    backend: str  # "serial" or "sim"
+    backend: str  # "serial", "sim" or "aisle"
     port: str
     baudrate: int
     arms: tuple[ArmConfig, ...]
@@ -30,6 +30,7 @@ class NodeConfig:
     base: str = "none"  # none | sim | serial (same bus as the arms)
     base_config: BaseConfig = field(default_factory=BaseConfig)
     base_command_timeout_s: float = 0.5
+    aisle_stale_s: float = 1.0
 
 
 def _parse_arms(spec: str) -> tuple[ArmConfig, ...]:
@@ -83,8 +84,8 @@ def from_env(env: Mapping[str, str] | None = None) -> NodeConfig:
     env = os.environ if env is None else env
     robot_id = env.get("ROBOT_ID", "so101")
     backend = env.get("SO101_BACKEND", "serial")
-    if backend not in ("serial", "sim"):
-        raise ValueError("SO101_BACKEND must be 'serial' or 'sim'")
+    if backend not in ("serial", "sim", "aisle"):
+        raise ValueError("SO101_BACKEND must be 'serial', 'sim' or 'aisle'")
     arms = _parse_arms(env.get("SO101_ARMS", "arm:1"))
     overrides = {}
     for item in filter(None, (s.strip() for s in env.get("SO101_CALIBRATION", "").split(","))):
@@ -102,6 +103,8 @@ def from_env(env: Mapping[str, str] | None = None) -> NodeConfig:
         max_ticks=int(env.get("BASE_MAX_TICKS", "600")),
         radius_m=float(env.get("BASE_RADIUS_M", "0.12")),
     )
+    if backend == "aisle" and (len(arms) != 1 or base != "none"):
+        raise ValueError("SO101_BACKEND=aisle drives one arm (AISLE's SO-101 scene) and no base")
     if base != "none" and set(base_ids) & {i for a in arms for i in a.ids}:
         raise ValueError(f"BASE_IDS {base_ids} overlap the arms' servo ids")
     calibration = {
@@ -124,4 +127,5 @@ def from_env(env: Mapping[str, str] | None = None) -> NodeConfig:
         base=base,
         base_config=base_config,
         base_command_timeout_s=float(env.get("BASE_COMMAND_TIMEOUT_S", "0.5")),
+        aisle_stale_s=float(env.get("AISLE_STATE_STALE_S", "1.0")),
     )

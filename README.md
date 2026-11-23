@@ -95,7 +95,7 @@ MCP clients connect to `http://127.0.0.1:8773/mcp` (see
 | Variable | Default | Meaning |
 |---|---|---|
 | `ROBOT_ID` | `so101` | Must equal the bridge's `ROBOT_ID` |
-| `SO101_BACKEND` | `serial` | `serial` or `sim` |
+| `SO101_BACKEND` | `serial` | `serial`, `sim`, or `aisle` (AISLE's SO-101 scene, see below) |
 | `SO101_PORT`, `SO101_BAUD` | `/dev/ttyACM0`, `1000000` | Serial bus |
 | `SO101_ARMS` | `arm:1` | `name:first_servo_id` list; Nano `left:1,right:7` |
 | `SO101_CALIBRATION` | LeRobot cache | `left=/path.json,right=/path.json`; default `~/.cache/huggingface/lerobot/calibration/robots/so_follower/<ROBOT_ID>[_<arm>].json`, or the older `so101_follower/` directory |
@@ -140,6 +140,34 @@ dora run dataflows/so-arm101-bridge.yaml   # run from octos-robot-skills; it tak
 
 The real arm is `left`; `right` and the base answer from simulated servos. The
 serial port is only opened when a real part needs it.
+
+## AISLE backend: evaluate this node in AISLE's physics
+
+`SO101_BACKEND=aisle` replaces the servos with AISLE's SO-101 dora topics, so AISLE
+evaluates the same vendor node that ships to the robot:
+
+| Topic | Direction | Contract |
+|---|---|---|
+| `joint_state` | in | Float32[6] radians: `shoulder_pan … wrist_roll, gripper` |
+| `joint_cmd` | out | Float32[6] radians, same order; the gripper entry is the jaw angle |
+| `gripper_cmd` | out | Float32[1] in [0, 1]; 0 open, 1 closed |
+| `reset_done` | in | Optional; cancels a move in flight after an episode reset |
+
+AISLE uses the official SO-101 new-calibration URDF, so node degrees are radians at
+the calibrated middle; bounds come from the URDF limits, and `rest` defaults to
+AISLE's home (arm zero, jaw open). Route `joint_cmd`/`gripper_cmd` through AISLE's
+budget-guard. The node answers `NOT_READY` until the first `joint_state` arrives,
+and treats a `joint_state` older than `AISLE_STATE_STALE_S` (1 s) as a hardware error.
+One arm, no base.
+
+`examples/dataflow-aisle-stub.yml` runs the node against a stand-in scene that checks
+the topic contract; `tests/test_aisle_contract.py` also runs every command through
+AISLE's real budget-guard when AISLE is installed (`pip install --no-deps -e <aisle>`,
+Python 3.11+) and requires zero clamps across a workspace sweep.
+
+The node has no Cartesian check: a joint target that puts the gripper into the table
+is stopped by the guard in AISLE (and by the tracking guard on the real arm), and the
+move fails and holds. A forward-kinematics floor check is a planned addition.
 
 ## Development
 
