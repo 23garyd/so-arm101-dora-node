@@ -86,10 +86,10 @@ def test_config_parses_nano_arms_and_calibration_paths(tmp_path):
            "SO101_CALIBRATION": "right=/cal/r.json"}
     cfg = from_env(env)
     assert [a.ids for a in cfg.arms] == [tuple(range(1, 7)), tuple(range(7, 13))]
-    assert cfg.calibration["left"] == tmp_path / "robots/so101_follower/nano_left.json"
+    assert cfg.calibration["left"] == tmp_path / "robots/so_follower/nano_left.json"
     assert cfg.calibration["right"] == Path("/cal/r.json")
     single = from_env({"ROBOT_ID": "bench", "HF_LEROBOT_CALIBRATION": str(tmp_path)})
-    assert single.calibration["arm"] == tmp_path / "robots/so101_follower/bench.json"
+    assert single.calibration["arm"] == tmp_path / "robots/so_follower/bench.json"
 
 
 @pytest.mark.parametrize("bad", ["left:1,right:4", "left", "left:x", "a:1,b:1"])
@@ -112,3 +112,15 @@ def test_rest_pose_from_env():
     assert cfg.rest_pose["shoulder_lift"] == -90.0
     with pytest.raises(ValueError, match="missing joints"):
         from_env({"SO101_REST_POSE": json.dumps({"shoulder_pan": 1})})
+
+
+def test_calibration_falls_back_to_the_older_lerobot_layout(tmp_path):
+    old = tmp_path / "robots/so101_follower/bench.json"
+    old.parent.mkdir(parents=True)
+    old.write_text("{}")
+    cfg = from_env({"ROBOT_ID": "bench", "HF_LEROBOT_CALIBRATION": str(tmp_path)})
+    assert cfg.calibration["arm"] == old
+    new = tmp_path / "robots/so_follower/bench.json"
+    new.parent.mkdir(parents=True)
+    new.write_text("{}")
+    assert from_env({"ROBOT_ID": "bench", "HF_LEROBOT_CALIBRATION": str(tmp_path)}).calibration["arm"] == new

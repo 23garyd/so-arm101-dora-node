@@ -2,7 +2,8 @@
 
 A calibration file maps joint names to ``{id, drive_mode, homing_offset, range_min,
 range_max}``, exactly as LeRobot writes it under
-``~/.cache/huggingface/lerobot/calibration/robots/so101_follower/<id>.json``. Files
+``~/.cache/huggingface/lerobot/calibration/robots/so_follower/<id>.json`` (``so101_follower/`` before
+LeRobot 0.4). Files
 from ``lerobot-calibrate``, DoRobot Studio and this package are interchangeable.
 LeKiwi-style prefixed names (``arm_shoulder_pan``) are accepted too.
 

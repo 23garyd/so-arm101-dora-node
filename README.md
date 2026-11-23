@@ -97,7 +97,7 @@ MCP clients connect to `http://127.0.0.1:8773/mcp` (see
 | `SO101_BACKEND` | `serial` | `serial` or `sim` |
 | `SO101_PORT`, `SO101_BAUD` | `/dev/ttyACM0`, `1000000` | Serial bus |
 | `SO101_ARMS` | `arm:1` | `name:first_servo_id` list; Nano `left:1,right:7` |
-| `SO101_CALIBRATION` | LeRobot cache | `left=/path.json,right=/path.json`; default `~/.cache/huggingface/lerobot/calibration/robots/so101_follower/<ROBOT_ID>[_<arm>].json` |
+| `SO101_CALIBRATION` | LeRobot cache | `left=/path.json,right=/path.json`; default `~/.cache/huggingface/lerobot/calibration/robots/so_follower/<ROBOT_ID>[_<arm>].json`, or the older `so101_follower/` directory |
 | `SO101_REST_POSE` | reference pose | JSON of all six joints, measured from your arm at rest |
 | `HEARTBEAT_TIMEOUT_MS` | `1000` | Watchdog; `0` disables |
 | `ESTOP_ACTION` | `hold` | `hold` or `torque_off` |
