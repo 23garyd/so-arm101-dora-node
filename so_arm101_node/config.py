@@ -53,14 +53,21 @@ def _parse_rest(raw: str | None) -> dict[str, float] | None:
     return {j: float(pose[j]) for j in JOINTS}
 
 
-def _calibration_root(env: Mapping[str, str]) -> Path:
+# Current LeRobot keeps SO-100/101 follower calibration under robots/so_follower/;
+# releases up to 0.3 used robots/so101_follower/. Look in both, newest layout first.
+CALIBRATION_DIRS = ("so_follower", "so101_follower")
+
+
+def _calibration_base(env: Mapping[str, str]) -> Path:
     base = env.get("HF_LEROBOT_CALIBRATION") or str(Path.home() / ".cache/huggingface/lerobot/calibration")
-    return Path(base) / "robots" / "so101_follower"
+    return Path(base) / "robots"
 
 
 def default_calibration_path(robot_id: str, arm: str, single: bool, env: Mapping[str, str]) -> Path:
+    """The first existing ``robots/{so_follower,so101_follower}/<stem>.json``, else the current layout."""
     stem = robot_id if single else f"{robot_id}_{arm}"
-    return _calibration_root(env) / f"{stem}.json"
+    candidates = [_calibration_base(env) / d / f"{stem}.json" for d in CALIBRATION_DIRS]
+    return next((c for c in candidates if c.exists()), candidates[0])
 
 
 def from_env(env: Mapping[str, str] | None = None) -> NodeConfig:

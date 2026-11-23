@@ -14,7 +14,7 @@ nodes:
       ROBOT_ID: nano-arms
       SO101_BACKEND: serial
       SO101_PORT: /dev/ttyACM0
-      # LeRobot calibration files; default ~/.cache/huggingface/lerobot/calibration/robots/so101_follower/<ROBOT_ID>_<arm>.json
+      # LeRobot calibration files; default ~/.cache/huggingface/lerobot/calibration/robots/so_follower/<ROBOT_ID>_<arm>.json (or the older so101_follower/)
       # SO101_CALIBRATION: "left=/path/left.json,right=/path/right.json"
       SO101_ARMS: "left:1,right:7"
       HEARTBEAT_TIMEOUT_MS: "1000"
