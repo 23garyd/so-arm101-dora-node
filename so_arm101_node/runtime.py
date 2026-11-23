@@ -20,6 +20,7 @@ from so_arm101_node._envelope import (
     stream_envelope,
 )
 from so_arm101_node.arm import SoArm101
+from so_arm101_node.base import OmniBase
 from so_arm101_node.config import NodeConfig
 from so_arm101_node.feetech import FeetechBus
 from so_arm101_node.motion import Limits
@@ -34,28 +35,61 @@ ADVERT_STARTUP_WINDOW_S = 10.0
 ADVERT_PERIOD_S = 30.0
 
 
-def build_controller(cfg: NodeConfig) -> tuple[So101Controller, FeetechBus]:
-    if cfg.backend == "sim":
-        ids = [i for arm in cfg.arms for i in arm.ids]
-        bus = FeetechBus(SimulatedServos(ids))
-        cals = {arm.name: calib.default_sim(arm.ids) for arm in cfg.arms}
-        write_cal = True
-    else:
-        bus = FeetechBus.open_serial(cfg.port, cfg.baudrate)
-        cals = {arm.name: calib.load(cfg.calibration[arm.name], arm.ids) for arm in cfg.arms}
-        write_cal = cfg.write_calibration
-    arms = {arm.name: SoArm101(bus, arm, cals[arm.name]) for arm in cfg.arms}
+class _Buses:
+    """The real serial bus (opened only if a part needs it) and one simulated bus."""
+
+    def __init__(self, cfg: NodeConfig) -> None:
+        self.cfg = cfg
+        self.serial: FeetechBus | None = None
+        self.sim: FeetechBus | None = None
+
+    def get(self, simulated: bool, ids: list[int]) -> FeetechBus:
+        if simulated:
+            if self.sim is None:
+                arm_ids = [i for a in self.cfg.arms for i in a.ids]
+                base_ids = list(self.cfg.base_config.ids) if self.cfg.base != "none" else []
+                self.sim = FeetechBus(SimulatedServos(arm_ids + base_ids))
+            return self.sim
+        if self.serial is None:
+            self.serial = FeetechBus.open_serial(self.cfg.port, self.cfg.baudrate)
+        return self.serial
+
+    def close(self) -> None:
+        for bus in (self.serial, self.sim):
+            if bus is not None:
+                bus.close()
+
+
+def build_controller(cfg: NodeConfig) -> tuple[So101Controller, _Buses]:
+    buses = _Buses(cfg)
+    all_sim = cfg.backend == "sim"
+    arms, writes = {}, set()
+    for arm in cfg.arms:
+        simulated = all_sim or arm.sim
+        if simulated:
+            cal = calib.default_sim(arm.ids)
+            writes.add(arm.name)
+        else:
+            cal = calib.load(cfg.calibration[arm.name], arm.ids)
+            if cfg.write_calibration:
+                writes.add(arm.name)
+        arms[arm.name] = SoArm101(buses.get(simulated, list(arm.ids)), arm, cal)
+    base = None
+    if cfg.base != "none":
+        base = OmniBase(buses.get(all_sim or cfg.base == "sim", list(cfg.base_config.ids)), cfg.base_config)
     controller = So101Controller(
         arms,
+        base=base,
+        base_command_timeout_s=cfg.base_command_timeout_s,
         robot_id=cfg.robot_id,
         limits=Limits(max_speed_deg_s=cfg.max_speed_deg_s),
         heartbeat_timeout_ms=cfg.heartbeat_timeout_ms,
         rest=cfg.rest_pose,
         estop_action=cfg.estop_action,
     )
-    for warning in controller.bring_up(write_calibration=write_cal):
+    for warning in controller.bring_up(write_calibration=writes):
         logger.warning(warning)
-    return controller, bus
+    return controller, buses
 
 
 def decode(value: Any) -> dict[str, Any] | None:
@@ -105,11 +139,8 @@ class Pump:
             self._send("cmd_response", response)
         for cancelled in self.c.take_cancelled_responses():
             self._send("cmd_response", cancelled)
-        if request.verb == "robot.estop":
-            for name in self.c.arms:
-                self._stream("safety_event", "robot.safety_event", "robot.safety_event.v1",
-                             {"kind": "estop_engaged", "arm": name, "reason": self.c.estop_reason,
-                              "action": self.c.estop_action})
+        for event in self.c.take_request_events():
+            self._stream("safety_event", "robot.safety_event", "robot.safety_event.v1", event)
 
     def on_tick(self) -> None:
         result = self.c.tick()

@@ -104,13 +104,42 @@ MCP clients connect to `http://127.0.0.1:8773/mcp` (see
 | `ESTOP_ACTION` | `hold` | `hold` or `torque_off` |
 | `MAX_SPEED_DEG_S` | `30` | Up to 90 |
 | `STATE_HZ` | `10` | `robot.state` rate |
+| `SO101_BASE` | `none` | Three-wheel omni base: `none`, `sim`, or `serial` (same bus as the arms) |
+| `BASE_IDS` | `13,14,15` | Wheel servo ids (left-front, back, right-front) |
+| `BASE_MAX_TICKS` | `600` | Wheel speed cap in ticks (≈ 0.046 m/s); the three wheels scale together |
+| `BASE_RADIUS_M` | `0.12` | Wheel distance from the centre, for `omega`; measure it on the robot |
+| `BASE_COMMAND_TIMEOUT_S` | `0.5` | A `set_velocity` without `duration_s` stops after this unless repeated |
 
-## One bus, one owner
+## Nano: two arms and the omni base on one bus
 
-The Feetech line is half-duplex, so exactly one process may open it. On a Nano,
-do not run this node and the `feetech-omni-car` plugin at the same time: both
-open `/dev/ttyACM0`. The base belongs in the same process as the arms; that is
-the next step for the Nano node.
+The Feetech line is half-duplex, so exactly one process may open it. On a Nano
+this node owns the whole bus: `SO101_ARMS=left:1,right:7 SO101_BASE=serial`.
+Do not run the `feetech-omni-car` plugin at the same time.
+
+With the base enabled the node adds two verbs:
+
+| Verb | Tier | What it does |
+|---|---|---|
+| `vendor.dora_nav.base.set_velocity` | safe_motion | `{"vx": m/s, "vy": m/s, "omega": rad/s}`. Without `duration_s` it is a deadman that stops after `BASE_COMMAND_TIMEOUT_S` unless repeated; with `duration_s` (≤ 10 s) the reply comes when the base has stopped |
+| `vendor.dora_nav.base.stop` | emergency_override | Zero the wheels and drop wheel torque |
+
+`robot.estop` and the heartbeat watchdog stop the base too. There is no wheel
+odometry: speeds are commands, not measured motion.
+
+### Developing the Nano with partial hardware
+
+Any arm can run on simulated servos with `@sim`, and the base with
+`SO101_BASE=sim`, while the rest uses the real bus. With one physical SO-101
+follower on `/dev/ttyACM0`:
+
+```bash
+SO101_PORT=/dev/ttyACM0 SO101_ARMS=left:1,right:7@sim SO101_BASE=sim \
+SO101_CALIBRATION=left=~/.cache/huggingface/lerobot/calibration/robots/so_follower/so101_follower.json \
+dora run dataflows/so-arm101-bridge.yaml   # run from octos-robot-skills; it takes these settings from the environment
+```
+
+The real arm is `left`; `right` and the base answer from simulated servos. The
+serial port is only opened when a real part needs it.
 
 ## Development
 
