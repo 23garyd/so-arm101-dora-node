@@ -53,8 +53,9 @@ plugin (rule R5):
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate     # 3.10+
-# dora-rs 1.0.1: from PyPI on 3.11+, or the vendored cp310 wheel in octos-robot-skills/vendor/wheels
-pip install "dora-rs==1.0.1" "dora-rs-cli==1.0.1"
+# dora 1.0.1 or 1.1.0; the CLI and dora-rs must be the same release, and match the bridge's venv.
+# 1.1.0 needs Python 3.11+; for 1.0.1 on 3.10 use the vendored wheels in octos-robot-skills/vendor/wheels.
+pip install "dora-rs==1.1.0" "dora-rs-cli==1.1.0"
 pip install -e ".[dev]" -e ../octos-robot-skills/bridge
 ```
 
