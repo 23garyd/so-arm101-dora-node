@@ -52,9 +52,17 @@ Put the arm in its rest pose and note the `read` output. Pass it to the node as
 ## Stage 3 — First motion
 
 ```bash
-so-arm101 --robot-id nano hello --arms left:1,right:7 --arm left            # dry run, prints the plan
-so-arm101 --robot-id nano hello --arms left:1,right:7 --arm left --go       # nods the wrist 10° and back
+so-arm101 --robot-id nano hello --arms left:1,right:7 --arm left                       # dry run, prints the plan
+so-arm101 --robot-id nano hello --arms left:1,right:7 --arm left --go --from <deg>      # nods the wrist 10° and back
 ```
+
+The wrist nods toward the middle of its range, away from the nearer limit. The dry
+run prints the exact `--go --from` value; `--go` refuses to move if the wrist is
+more than 3° away from it, so the move that runs is the one you approved. Do not
+reposition the arm between the dry run and `--go`.
+
+If a joint is blocked before it settles, the move ends with `NOT_REACHED` and the
+arm holds where it stopped instead of pushing on.
 
 Ctrl-C during the move estops and holds the pose. Torque stays on afterwards;
 support the arm before `so-arm101 torque-off`.

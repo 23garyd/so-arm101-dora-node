@@ -69,7 +69,7 @@ so-arm101 --robot-id nano calibrate --arm left --first-id 1   # once per arm, Le
 so-arm101 --robot-id nano calibrate --arm right --first-id 7
 so-arm101 --robot-id nano read --arms left:1,right:7
 so-arm101 --robot-id nano hello --arms left:1,right:7 --arm left          # dry run
-so-arm101 --robot-id nano hello --arms left:1,right:7 --arm left --go     # moves
+so-arm101 --robot-id nano hello --arms left:1,right:7 --arm left --go --from <deg>   # moves
 ```
 
 Every command takes `--sim` to run against simulated servos.

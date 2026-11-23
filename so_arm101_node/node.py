@@ -14,6 +14,8 @@ Safety behaviour:
   because a limp arm falls under gravity.
 - A body joint lagging its commanded position by more than the tracking limit
   (a collision or stall) aborts the move and holds.
+- A move that does not settle on its goal holds where it stopped (``NOT_REACHED``)
+  instead of pushing on toward the goal.
 """
 
 from __future__ import annotations
@@ -362,13 +364,18 @@ class So101Controller:
             data = {"joints": present, "goal": goal, "gripper_blocked": not gripper_ok}
             result.responses.append(cmd_response(motion.request, ok=True, code="0", data=data))
         elif timed_out:
+            # Hold where the arm stopped: leaving the goal in place keeps a blocked joint
+            # pushing against whatever stopped it.
+            arm.write_goal(present)
             del self._motions[name]
             off = {j: round(present[j] - goal[j], 1) for j in BODY_JOINTS
                    if abs(present[j] - goal[j]) > self.limits.settle_tolerance_deg}
             result.responses.append(cmd_response(
                 motion.request, ok=False, code="NOT_REACHED",
-                msg=f"arm {name}: joints did not settle on the goal: {off}",
+                msg=f"arm {name}: joints did not settle on the goal: {off}; holding where it stopped",
                 data={"joints": present, "goal": goal}))
+            result.safety_events.append({"kind": "not_reached", "arm": name,
+                                         "offsets_deg": off})
 
     # =================================================================
     # Estop and cancellation
