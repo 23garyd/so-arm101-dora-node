@@ -212,6 +212,60 @@ def test_serial_exception_on_an_effort_read_keeps_the_node_answering(rig, clock,
         assert state[field]["elbow_flex"] is not None  # other joints unaffected
 
 
+class _PortDropsAfter:
+    """The simulated bus, until ``drop()``: then every call raises pyserial's SerialException."""
+
+    def __init__(self, sim):
+        self.sim, self.dropped = sim, False
+
+    def drop(self):
+        self.dropped = True
+
+    def _check(self):
+        if self.dropped:
+            raise serial.SerialException("[Errno 5] Input/output error")
+
+    def write(self, data):
+        self._check()
+        return self.sim.write(data)
+
+    def read(self, size):
+        self._check()
+        return self.sim.read(size)
+
+    def reset_input_buffer(self):
+        self._check()
+        self.sim.reset_input_buffer()
+
+
+def test_serial_port_lost_on_a_position_read_is_a_hardware_error(rig, clock):
+    controller, sim = rig
+    port = _PortDropsAfter(sim)
+    controller.arms["left"].bus._io = port
+    port.drop()
+    r = controller.handle(req(f"{NS}.get_joint_state"))  # must return, not raise
+    assert r["ok"] is False and r["code"] == "HARDWARE_ERROR" and "transport error" in r["msg"]
+    controller.state_payload()  # the state stream must not raise either
+
+
+def test_serial_port_lost_during_a_move_ends_it_with_a_hardware_error(rig, clock):
+    controller, sim = rig
+    run(controller, clock, f"{NS}.enable_torque")
+    port = _PortDropsAfter(sim)
+    controller.arms["left"].bus._io = port
+    request = req(f"{NS}.move_to_joint_state", joints={"shoulder_pan": 40.0})
+    assert controller.handle(request) is None
+    clock.advance(0.1)
+    controller.tick()
+    port.drop()
+    clock.advance(0.02)
+    result = controller.tick()  # must return, not raise
+    mine = [r for r in result.responses if r["request_id"] == request.request_id]
+    assert mine and mine[0]["code"] == "HARDWARE_ERROR"
+    assert any(e["kind"] == "hardware_error" for e in result.safety_events)
+    assert controller._motions == {}
+
+
 def test_position_read_failure_is_still_a_hardware_error(rig, clock):
     controller, sim = rig
     real_write = sim.write

@@ -105,7 +105,7 @@ class OmniBase:
                     self.bus.write(servo_id, register, 0)
                 except ft.FeetechError as e:
                     errors.append(str(e))
+        if errors:  # do not claim the wheels stopped: last_ticks keeps the last command
+            raise BaseError(f"base stop failed: {'; '.join(errors)}")
         self.enabled = False
         self.last_ticks = (0, 0, 0)
-        if errors:
-            raise BaseError(f"base stop failed: {'; '.join(errors)}")

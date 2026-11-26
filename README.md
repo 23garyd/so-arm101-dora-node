@@ -78,6 +78,26 @@ plugin (rule R5):
   still touch the table or the arm's own links, which the tracking guard catches.
 - Motion requires `enable_torque` first. Calibration in the servo EEPROM must match
   the calibration file, or the node refuses to start.
+- Stop commands never report success for a hardware action that failed.
+  - **Arm stop:** if the hold write fails, `vendor.lerobot.so101.stop` answers
+    `HARDWARE_ERROR` (with `data.failed`) and emits a `hardware_error` event.
+  - **Estop:** `robot.estop` always latches. If the hold or torque-off write
+    fails it answers `HARDWARE_ERROR` with `data.estopped: true`, and the
+    `estop_engaged` event carries `ok: false` and the failed action. An arm
+    whose torque-off failed stays reported as powered.
+  - **Base:** a failed stop (the stop verb, the end of a timed move, a zero
+    velocity, an estop, or a start that failed partway) is reported as
+    `HARDWARE_ERROR` and retried on every tick until it succeeds. Meanwhile the
+    state stream shows the base as moving with its last commanded wheel speeds,
+    and a non-zero `set_velocity` is refused (a zero velocity, being a stop, is
+    accepted).
+  - **Unconfirmed hold:** when an arm's hold write fails (a stop, an estop, or
+    a move ended by a bus error), the hold is retried on every tick. Until it
+    succeeds, `get_joint_state` and the state stream report the arm as `moving`
+    with `hold_confirmed: false`, and new moves and plans for that arm are
+    refused. A `hold_confirmed` safety event marks the recovery.
+  - **Serial faults:** pyserial errors are reported as bus errors (`HARDWARE_ERROR`)
+    instead of stopping the node.
 
 ## Install
 
