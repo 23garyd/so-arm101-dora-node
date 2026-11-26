@@ -8,12 +8,15 @@ every arm (and later to the base driver).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Protocol
 
 from so_arm101_node import calibration as calib
 from so_arm101_node import feetech as ft
 from so_arm101_node.calibration import GRIPPER, JOINTS, MotorCalibration
+
+logger = logging.getLogger(__name__)
 
 
 class ArmError(RuntimeError):
@@ -48,7 +51,7 @@ class Arm(Protocol):
     def write_calibration(self) -> None: ...
     def configure(self) -> None: ...
     def read_joints(self) -> dict[str, float]: ...
-    def read_load(self) -> dict[str, dict[str, float]] | None: ...
+    def read_effort(self) -> dict[str, dict[str, float | None]] | None: ...
     def torque_enabled(self) -> bool: ...
     def enable_torque(self) -> dict[str, float]: ...
     def disable_torque(self) -> None: ...
@@ -133,12 +136,25 @@ class SoArm101:
     def read_joints(self) -> dict[str, float]:
         return {j: calib.to_user(j, self.cal[j], raw) for j, raw in self.read_raw().items()}
 
-    def read_load(self) -> dict[str, dict[str, float]]:
-        """Per joint: ``load`` in signed percent of max torque and ``current_ma``."""
-        load, current = {}, {}
+    def read_effort(self) -> dict[str, dict[str, float | None]]:
+        """Per joint: ``load`` (signed motor-drive duty cycle, percent) and signed ``current_ma``.
+
+        Effort is secondary telemetry: a value whose read fails is ``None`` and the other
+        values are still returned, so a flaky effort read never hides the joint positions.
+        """
+        load: dict[str, float | None] = {}
+        current: dict[str, float | None] = {}
         for j, i in self._id.items():
-            load[j] = round(self.bus.read_load(i) * ft.LOAD_PERCENT_PER_UNIT, 1)
-            current[j] = round(self.bus.read_current(i) * ft.CURRENT_MA_PER_UNIT, 1)
+            try:
+                load[j] = round(self.bus.read_load(i) * ft.LOAD_PERCENT_PER_UNIT, 1)
+            except ft.FeetechError as e:
+                logger.warning("arm %s: %s load read failed: %s", self.name, j, e)
+                load[j] = None
+            try:
+                current[j] = round(self.bus.read_current(i) * ft.CURRENT_MA_PER_UNIT, 1)
+            except ft.FeetechError as e:
+                logger.warning("arm %s: %s current read failed: %s", self.name, j, e)
+                current[j] = None
         return {"load": load, "current_ma": current}
 
     def torque_enabled(self) -> bool:

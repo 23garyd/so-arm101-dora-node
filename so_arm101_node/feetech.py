@@ -53,12 +53,16 @@ PRESENT_TEMPERATURE = (63, 1)
 MOVING = (66, 1)
 PRESENT_CURRENT = (69, 2)
 
-# Scales from the Feetech STS3215 memory table (not in LeRobot, which reads raw values):
-# Present_Load is sign-magnitude with the sign in bit 10, 0..1000 = 0..100 % of max torque;
-# Present_Current counts 6.5 mA per unit. Check both against a real servo before relying on
-# the absolute numbers; the sign and relative size are what grasp detection needs.
+# Encodings and units from the Feetech STS memory table, SRAM feedback section
+# (https://ftservo.github.io/ftservo-wiki/en/reference/parameter/memory-sts/#24-sram):
+# - Present_Load (60): "duty cycle of the output driving the motor; BIT10 is the direction
+#   bit", 0.1 % per unit. It is the PWM duty of the motor drive, an effort proxy, not a
+#   torque measurement. LeRobot decodes it with the same sign bit 10.
+# - Present_Current (69): "motor phase current feedback; BIT15 is the current direction
+#   bit", 6.5 mA per unit. Signed, like position and speed.
 LOAD_SIGN_BIT = 10
 LOAD_PERCENT_PER_UNIT = 0.1
+CURRENT_SIGN_BIT = 15
 CURRENT_MA_PER_UNIT = 6.5
 
 STATUS_ERROR_BITS = {
@@ -200,12 +204,12 @@ class FeetechBus:
         return decode_sign_magnitude(self.read(servo_id, PRESENT_POSITION), 15)
 
     def read_load(self, servo_id: int) -> int:
-        """Signed load in raw units (0.1 % of max torque); the sign is the load direction."""
+        """Signed motor-drive duty cycle in raw units (0.1 % each); the sign is the direction."""
         return decode_sign_magnitude(self.read(servo_id, PRESENT_LOAD), LOAD_SIGN_BIT)
 
     def read_current(self, servo_id: int) -> int:
-        """Motor current in raw units (6.5 mA each)."""
-        return self.read(servo_id, PRESENT_CURRENT)
+        """Signed motor phase current in raw units (6.5 mA each)."""
+        return decode_sign_magnitude(self.read(servo_id, PRESENT_CURRENT), CURRENT_SIGN_BIT)
 
     def read_homing_offset(self, servo_id: int) -> int:
         return decode_sign_magnitude(self.read(servo_id, HOMING_OFFSET), 11)

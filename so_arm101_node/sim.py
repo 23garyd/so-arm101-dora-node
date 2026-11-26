@@ -9,9 +9,10 @@ Behaviour that matters to callers:
 - with torque on, the encoder slews toward the goal at ``slew_ticks_per_s``;
 - a servo can be told to stall (``block``) to emulate a collision or a held object;
 - a servo id can be removed to emulate a missing or unpowered motor;
-- present load and current are plausible, not measured: zero with torque off, a
-  small holding load, a moderate load while slewing, and the torque limit while
-  stalled against a block (what a gripper holding an object reports).
+- present load (drive duty cycle) and current are plausible, not measured: zero with
+  torque off, a small holding load, a moderate load while slewing, and the torque
+  limit while stalled against a block (what a gripper holding an object reports);
+  both carry the drive direction as their sign.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from collections.abc import Callable, Iterable
 
 from so_arm101_node import feetech as ft
 
-# Simulated effort, in Present_Load units (0.1 % of max torque).
+# Simulated effort, in Present_Load units (0.1 % drive duty cycle).
 HOLD_LOAD = 20
 SLEW_LOAD = 150
 CURRENT_PER_LOAD = 0.4  # raw current units per load unit: 100 % load ~ 400 x 6.5 mA = 2.6 A
@@ -173,8 +174,11 @@ class SimulatedServos:
         servo.set(ft.MOVING, 1 if moving else 0)
         load = self._load(servo, goal)
         servo.set(ft.PRESENT_LOAD, ft.encode_sign_magnitude(load, ft.LOAD_SIGN_BIT))
-        current = round(abs(load) * CURRENT_PER_LOAD) + IDLE_CURRENT if servo.get(ft.TORQUE_ENABLE) else 0
-        servo.set(ft.PRESENT_CURRENT, current)
+        current = 0
+        if servo.get(ft.TORQUE_ENABLE):
+            current = round(abs(load) * CURRENT_PER_LOAD) + IDLE_CURRENT
+            current = -current if load < 0 else current  # current flows with the drive direction
+        servo.set(ft.PRESENT_CURRENT, ft.encode_sign_magnitude(current, ft.CURRENT_SIGN_BIT))
 
     @staticmethod
     def _load(servo: _Servo, goal_encoder: float) -> int:

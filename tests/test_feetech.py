@@ -72,7 +72,7 @@ def test_sync_write_reaches_every_listed_servo():
 
 
 def test_load_and_current_decoding():
-    """Present_Load is sign-magnitude with the sign in bit 10; Present_Current is unsigned."""
+    """Feetech STS table: Present_Load's direction is BIT10, Present_Current's is BIT15."""
 
     class Raw(SimulatedServos):
         def _refresh_present(self, servo):  # keep the registers exactly as the test set them
@@ -84,6 +84,10 @@ def test_load_and_current_decoding():
     sim.servos[2].set(ft.PRESENT_CURRENT, 154)
     assert bus.read_load(2) == -300
     assert bus.read_current(2) == 154
+    sim.servos[2].set(ft.PRESENT_CURRENT, 0x8000 | 154)  # BIT15 set: a negative current
+    assert bus.read_current(2) == -154
+    sim.servos[2].set(ft.PRESENT_CURRENT, 0x400 | 154)  # BIT10 is magnitude for current, not sign
+    assert bus.read_current(2) == 0x400 | 154
     sim.servos[2].set(ft.PRESENT_LOAD, 1000)
     assert bus.read_load(2) == 1000
     assert ft.PRESENT_LOAD == (60, 2) and ft.PRESENT_CURRENT == (69, 2)  # LeRobot feetech/tables.py
@@ -107,6 +111,6 @@ def test_simulated_load_follows_torque_motion_and_stall():
     sim.block(1)  # stalled against something while still commanded to move
     t[0] += 5.0
     assert bus.read_load(1) == -1000  # pushing at the torque limit
-    assert bus.read_current(1) > 300
+    assert bus.read_current(1) < -300  # current carries the drive direction too
     bus.write(1, ft.MAX_TORQUE_LIMIT, 500)
     assert bus.read_load(1) == -500  # capped by the configured limit

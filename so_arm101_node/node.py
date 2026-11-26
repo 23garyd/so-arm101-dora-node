@@ -249,7 +249,7 @@ class So101Controller:
             arm = self.arms[name]
             joints = arm.read_joints()
             self._last_joints[name] = joints
-            effort = arm.read_load()
+            effort = arm.read_effort()  # after the positions; never raises for a failed effort read
             data[name] = {
                 "joints": joints,
                 "torque": self._torque[name],
@@ -596,8 +596,8 @@ class So101Controller:
             "arms": {name: {"servo_ids": list(arm.config.ids), "bounds": arm.bounds()}
                      for name, arm in self.arms.items()},
             "joints": list(JOINTS),
-            "units": {"body": "deg", "gripper": "percent_open", "load": "percent_max_torque",
-                      "current": "mA"},
+            "units": {"body": "deg", "gripper": "percent_open",
+                      "load": "percent_drive_duty_signed", "current": "mA_signed"},
             "named_poses": self.named_poses,
             "limits": {
                 "max_speed_deg_s": self.limits.max_speed_deg_s,

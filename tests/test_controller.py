@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from so_arm101_node import feetech as ft
 from so_arm101_node._envelope import CmdRequest
 from so_arm101_node.arm import ArmError
 from so_arm101_node.node import NS, VERB_TIERS
@@ -131,8 +132,49 @@ def test_joint_state_reports_load_and_a_held_object(rig, clock):
     held = run(controller, clock, f"{NS}.get_joint_state")["data"]["arms"]["left"]
     # configure() caps the gripper at 50 % torque; a held object pushes it to that cap
     assert abs(held["load"]["gripper"]) == pytest.approx(50.0)
-    assert held["current_ma"]["gripper"] > 5 * free["current_ma"]["gripper"]
+    assert abs(held["current_ma"]["gripper"]) > 5 * abs(free["current_ma"]["gripper"])
+    assert (held["current_ma"]["gripper"] > 0) == (held["load"]["gripper"] > 0)  # same direction
     assert abs(held["load"]["shoulder_pan"]) < 10  # other joints just hold
+
+
+def test_negative_current_reaches_get_joint_state_in_ma(rig, clock):
+    controller, sim = rig
+
+    # after the simulator's own update, overwrite effort with raw negative readings
+    sim._refresh_present = lambda servo, _orig=sim._refresh_present: (
+        _orig(servo), servo.set(ft.PRESENT_CURRENT, 0x8000 | 200), servo.set(ft.PRESENT_LOAD, 0x400 | 300))
+    state = run(controller, clock, f"{NS}.get_joint_state")["data"]["arms"]["left"]
+    assert state["current_ma"]["elbow_flex"] == pytest.approx(-1300.0)  # -200 x 6.5 mA
+    assert state["load"]["elbow_flex"] == pytest.approx(-30.0)  # -300 x 0.1 %
+
+
+def test_effort_timeout_keeps_joint_positions(rig, clock):
+    """A servo that stops answering effort reads still reports its position."""
+    controller, sim = rig
+    expected = run(controller, clock, f"{NS}.get_joint_state")["data"]["arms"]["left"]["joints"]
+    effort_registers = {ft.PRESENT_LOAD[0], ft.PRESENT_CURRENT[0]}
+    real_write = sim.write
+
+    def write(data):  # servo 3 (elbow_flex) times out on load and current reads only
+        if len(data) > 6 and data[2] == 3 and data[4] == ft.INSTR_READ and data[5] in effort_registers:
+            return len(data)  # no reply: the bus read times out
+        return real_write(data)
+
+    sim.write = write
+    r = run(controller, clock, f"{NS}.get_joint_state")
+    assert r["ok"], r
+    state = r["data"]["arms"]["left"]
+    assert state["joints"] == pytest.approx(expected, abs=0.2)
+    assert state["load"]["elbow_flex"] is None and state["current_ma"]["elbow_flex"] is None
+    assert state["load"]["shoulder_pan"] is not None and state["current_ma"]["gripper"] is not None
+
+
+def test_position_read_failure_is_still_a_hardware_error(rig, clock):
+    controller, sim = rig
+    real_write = sim.write
+    sim.write = lambda data: (len(data) if len(data) > 6 and data[2] == 3 and data[4] == ft.INSTR_READ
+                              and data[5] == ft.PRESENT_POSITION[0] else real_write(data))
+    assert run(controller, clock, f"{NS}.get_joint_state")["code"] == "HARDWARE_ERROR"
 
 
 def test_estop_cancels_motion_and_latches(rig, clock):
