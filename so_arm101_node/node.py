@@ -145,6 +145,7 @@ class So101Controller:
         self.base_command_timeout_s = base_command_timeout_s
         self.tcp_floor_m = tcp_floor_m
         self._base_cmd: _BaseCommand | None = None
+        self._base_stop_pending = False  # a base stop failed; tick() retries it
         self.robot_id = robot_id
         self.limits = limits or Limits()
         self.named_poses = {"rest": dict(rest or DEFAULT_REST), "home": dict(home or DEFAULT_HOME)}
@@ -271,7 +272,14 @@ class So101Controller:
         reason = str(request.params.get("reason", "estop"))
         events = self._engage_estop(reason, kind="estop_engaged")
         self._request_events += events
-        return self._ok(request, {"action": self.estop_action, "events": len(events)})
+        failed = {str(e.get("arm") or e.get("part")): e["failed"] for e in events if not e["ok"]}
+        data = {"action": self.estop_action, "events": len(events), "estopped": True, "failed": failed}
+        if failed:
+            # The latch is engaged either way; the hardware action is what failed.
+            return cmd_response(request, ok=False, code="HARDWARE_ERROR",
+                                msg=f"estop latched, but the hardware action failed on {sorted(failed)}",
+                                data=data)
+        return self._ok(request, data)
 
     def _clear_estop(self, request: CmdRequest) -> dict[str, Any]:
         self.estopped = False
@@ -279,11 +287,20 @@ class So101Controller:
         return self._ok(request)
 
     def _stop(self, request: CmdRequest) -> dict[str, Any]:
-        stopped = []
+        stopped, failed = [], {}
         for name in self._arm_names(request, required=False):
-            if self._cancel_motion(name, "PREEMPTED", "stopped by vendor.lerobot.so101.stop"):
+            cancelled, hold_error = self._cancel_motion(name, "PREEMPTED", "stopped by vendor.lerobot.so101.stop")
+            if cancelled:
                 stopped.append(name)
-        return self._ok(request, {"stopped": stopped})
+            if hold_error:
+                failed[name] = hold_error
+                self._request_events.append({"kind": "hardware_error", "arm": name, "action": "hold",
+                                             "detail": hold_error})
+        if failed:
+            return cmd_response(request, ok=False, code="HARDWARE_ERROR",
+                                msg=f"stop: the hold write failed on {sorted(failed)}; the arm may still move",
+                                data={"stopped": stopped, "failed": failed})
+        return self._ok(request, {"stopped": stopped, "failed": {}})
 
     def _enable_torque(self, request: CmdRequest) -> dict[str, Any]:
         self._refuse_if_estopped()
@@ -333,11 +350,23 @@ class So101Controller:
             raise _Refusal("INVALID_PARAMS", f"duration_s must be in (0, {MAX_BASE_DURATION_S}]")
         self._finish_base_request("PREEMPTED", "replaced by a newer set_velocity")
         if vx == vy == omega == 0.0:
-            self.base.stop()
             self._base_cmd = None
+            stop_error = self._stop_base()
+            if stop_error:
+                return cmd_response(request, ok=False, code="HARDWARE_ERROR",
+                                    msg=f"base stop failed (retrying): {stop_error}")
             return self._ok(request, {"ticks": [0, 0, 0]})
         ticks = wheel_ticks(vx, vy, omega, self.base.config)
-        self.base.drive(ticks)
+        try:
+            self.base.drive(ticks)
+        except (BaseError, ft.FeetechError) as e:
+            # Some wheels may already have the new speed: stop them all (retried until it works).
+            logger.exception("base: starting a move failed")
+            self._base_cmd = None
+            stop_error = self._stop_base()
+            after = f"; the stop also failed and is retried: {stop_error}" if stop_error else "; base stopped"
+            return cmd_response(request, ok=False, code="HARDWARE_ERROR", msg=f"base drive failed: {e}{after}")
+        self._base_stop_pending = False
         now = self._clock()
         expires = now + (duration if duration is not None else self.base_command_timeout_s)
         self._base_cmd = _BaseCommand((vx, vy, omega), ticks, expires, request if duration else None)
@@ -348,8 +377,11 @@ class So101Controller:
     def _base_stop(self, request: CmdRequest) -> dict[str, Any]:
         assert self.base is not None
         self._finish_base_request("PREEMPTED", f"stopped by {BASE_NS}.stop")
-        self.base.stop()
         self._base_cmd = None
+        stop_error = self._stop_base()
+        if stop_error:
+            return cmd_response(request, ok=False, code="HARDWARE_ERROR",
+                                msg=f"base stop failed (retrying on every tick): {stop_error}")
         return self._ok(request)
 
     def _finish_base_request(self, code: str, msg: str) -> None:
@@ -492,16 +524,21 @@ class So101Controller:
             result.safety_events += self._engage_estop("heartbeat lapsed during motion", kind="watchdog_timeout")
         if self._base_cmd is not None and now >= self._base_cmd.expires_at:
             command, self._base_cmd = self._base_cmd, None
-            try:
-                assert self.base is not None
-                self.base.stop()
-            except (BaseError, ft.FeetechError) as e:
-                logger.exception("base: stop after the command ended failed")
-                result.safety_events.append({"kind": "hardware_error", "part": "base", "detail": str(e)})
+            stop_error = self._stop_base()
+            if stop_error:
+                result.safety_events.append({"kind": "hardware_error", "part": "base", "action": "stop",
+                                             "detail": stop_error})
             if command.request is not None:
-                result.responses.append(cmd_response(command.request, ok=True, code="0",
-                                                     data={"velocity": list(command.velocity),
-                                                           "ticks": list(command.ticks)}))
+                if stop_error:
+                    result.responses.append(cmd_response(
+                        command.request, ok=False, code="HARDWARE_ERROR",
+                        msg=f"base stop at the end of the move failed (retrying): {stop_error}"))
+                else:
+                    result.responses.append(cmd_response(command.request, ok=True, code="0",
+                                                         data={"velocity": list(command.velocity),
+                                                               "ticks": list(command.ticks)}))
+        elif self._base_stop_pending and self._base_cmd is None and self._stop_base() is None:
+            logger.warning("base: pending stop succeeded")
         for name in list(self._motions):
             try:
                 self._advance(name, now, result)
@@ -514,7 +551,7 @@ class So101Controller:
         return result
 
     def _watchdog_due(self, now: float) -> bool:
-        moving = bool(self._motions) or self._base_cmd is not None
+        moving = bool(self._motions) or self._base_cmd is not None or self._base_stop_pending
         if self.heartbeat_timeout_ms <= 0 or self._watchdog_fired or not moving:
             return False
         return (now - self._last_beat) * 1000 > self.heartbeat_timeout_ms
@@ -569,18 +606,20 @@ class So101Controller:
     # Estop and cancellation
     # =================================================================
 
-    def _cancel_motion(self, name: str, code: str, msg: str) -> bool:
+    def _cancel_motion(self, name: str, code: str, msg: str) -> tuple[bool, str | None]:
+        """End the arm's move and hold where it is. Returns (a move was cancelled, hold error)."""
         motion = self._motions.pop(name, None)
         arm = self.arms[name]
+        hold_error = None
         if self._torque[name]:
             try:
                 arm.write_goal(arm.read_joints())
-            except (ArmError, ft.FeetechError):
+            except (ArmError, ft.FeetechError) as e:
                 logger.exception("arm %s: hold after cancel failed", name)
-        if motion is None:
-            return False
-        self._cancelled.append(cmd_response(motion.request, ok=False, code=code, msg=msg))
-        return True
+                hold_error = str(e)
+        if motion is not None:
+            self._cancelled.append(cmd_response(motion.request, ok=False, code=code, msg=msg))
+        return motion is not None, hold_error
 
     def _drain_cancelled(self) -> list[dict[str, Any]]:
         out, self._cancelled = self._cancelled, []
@@ -591,23 +630,38 @@ class So101Controller:
         self.estop_reason = reason
         events = []
         for name in self.arms:
-            self._cancel_motion(name, "ESTOPPED", f"estop: {reason}")
+            failed = {}
+            _, hold_error = self._cancel_motion(name, "ESTOPPED", f"estop: {reason}")
+            if hold_error:
+                failed["hold"] = hold_error
             if self.estop_action == "torque_off":
                 try:
                     self.arms[name].disable_torque()
                     self._torque[name] = False
-                except ArmError:
+                except (ArmError, ft.FeetechError) as e:  # torque stays reported as on
                     logger.exception("arm %s: torque off during estop failed", name)
-            events.append({"kind": kind, "arm": name, "reason": reason, "action": self.estop_action})
+                    failed["torque_off"] = str(e)
+            events.append({"kind": kind, "arm": name, "reason": reason, "action": self.estop_action,
+                           "ok": not failed, "failed": failed})
         if self.base is not None:
             self._finish_base_request("ESTOPPED", f"estop: {reason}")
             self._base_cmd = None
-            try:
-                self.base.stop()
-            except BaseError:
-                logger.exception("base: stop during estop failed")
-            events.append({"kind": kind, "part": "base", "reason": reason, "action": "stop"})
+            stop_error = self._stop_base()
+            events.append({"kind": kind, "part": "base", "reason": reason, "action": "stop",
+                           "ok": stop_error is None, "failed": {"stop": stop_error} if stop_error else {}})
         return events
+
+    def _stop_base(self) -> str | None:
+        """Stop the base. On failure keep the stop pending so tick() retries it; return the error."""
+        assert self.base is not None
+        try:
+            self.base.stop()
+        except (BaseError, ft.FeetechError) as e:
+            logger.exception("base: stop failed; retrying on every tick")
+            self._base_stop_pending = True
+            return str(e)
+        self._base_stop_pending = False
+        return None
 
     def on_reset(self, reason: str = "episode reset") -> None:
         """An external reset moved the robot (e.g. AISLE teleported home): end moves in flight."""
@@ -653,7 +707,7 @@ class So101Controller:
         state: dict[str, Any] = {"arms": arms, "estopped": self.estopped, "estop_reason": self.estop_reason}
         if self.base is not None:
             cmd = self._base_cmd
-            state["base"] = {"moving": cmd is not None,
+            state["base"] = {"moving": cmd is not None or self._base_stop_pending,
                              "velocity": list(cmd.velocity) if cmd else [0.0, 0.0, 0.0],
                              "ticks": list(self.base.last_ticks), "odometry": None}
         return state
