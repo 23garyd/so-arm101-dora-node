@@ -246,9 +246,17 @@ class So101Controller:
     def _get_joint_state(self, request: CmdRequest) -> dict[str, Any]:
         data = {}
         for name in self._arm_names(request, required=False):
-            joints = self.arms[name].read_joints()
+            arm = self.arms[name]
+            joints = arm.read_joints()
             self._last_joints[name] = joints
-            data[name] = {"joints": joints, "torque": self._torque[name], "moving": name in self._motions}
+            effort = arm.read_load()
+            data[name] = {
+                "joints": joints,
+                "torque": self._torque[name],
+                "moving": name in self._motions,
+                "load": effort["load"] if effort else None,
+                "current_ma": effort["current_ma"] if effort else None,
+            }
         return self._ok(request, {"arms": data, "estopped": self.estopped})
 
     def _estop(self, request: CmdRequest) -> dict[str, Any]:
@@ -588,7 +596,8 @@ class So101Controller:
             "arms": {name: {"servo_ids": list(arm.config.ids), "bounds": arm.bounds()}
                      for name, arm in self.arms.items()},
             "joints": list(JOINTS),
-            "units": {"body": "deg", "gripper": "percent_open"},
+            "units": {"body": "deg", "gripper": "percent_open", "load": "percent_max_torque",
+                      "current": "mA"},
             "named_poses": self.named_poses,
             "limits": {
                 "max_speed_deg_s": self.limits.max_speed_deg_s,

@@ -8,7 +8,10 @@ Behaviour that matters to callers:
 - present position = encoder - homing offset (sign-magnitude, like the STS3215);
 - with torque on, the encoder slews toward the goal at ``slew_ticks_per_s``;
 - a servo can be told to stall (``block``) to emulate a collision or a held object;
-- a servo id can be removed to emulate a missing or unpowered motor.
+- a servo id can be removed to emulate a missing or unpowered motor;
+- present load and current are plausible, not measured: zero with torque off, a
+  small holding load, a moderate load while slewing, and the torque limit while
+  stalled against a block (what a gripper holding an object reports).
 """
 
 from __future__ import annotations
@@ -17,6 +20,12 @@ import time
 from collections.abc import Callable, Iterable
 
 from so_arm101_node import feetech as ft
+
+# Simulated effort, in Present_Load units (0.1 % of max torque).
+HOLD_LOAD = 20
+SLEW_LOAD = 150
+CURRENT_PER_LOAD = 0.4  # raw current units per load unit: 100 % load ~ 400 x 6.5 mA = 2.6 A
+IDLE_CURRENT = 2  # raw units with torque on and no load
 
 
 class _Servo:
@@ -27,6 +36,7 @@ class _Servo:
         self.regs[ft.MODEL_NUMBER[0]:ft.MODEL_NUMBER[0] + 2] = ft.STS3215_MODEL.to_bytes(2, "little")
         self.regs[5] = servo_id
         self.set(ft.MAX_POSITION_LIMIT, 4095)
+        self.set(ft.MAX_TORQUE_LIMIT, 1000)
         self.set(ft.LOCK, 1)
         self.set(ft.PRESENT_VOLTAGE, 120)
         self.set(ft.PRESENT_TEMPERATURE, 30)
@@ -161,6 +171,26 @@ class SimulatedServos:
         goal = servo.get(ft.GOAL_POSITION) + servo.homing_offset()
         moving = servo.get(ft.TORQUE_ENABLE) and abs(goal - servo.encoder) > 1
         servo.set(ft.MOVING, 1 if moving else 0)
+        load = self._load(servo, goal)
+        servo.set(ft.PRESENT_LOAD, ft.encode_sign_magnitude(load, ft.LOAD_SIGN_BIT))
+        current = round(abs(load) * CURRENT_PER_LOAD) + IDLE_CURRENT if servo.get(ft.TORQUE_ENABLE) else 0
+        servo.set(ft.PRESENT_CURRENT, current)
+
+    @staticmethod
+    def _load(servo: _Servo, goal_encoder: float) -> int:
+        if not servo.get(ft.TORQUE_ENABLE):
+            return 0
+        limit = min(servo.get(ft.MAX_TORQUE_LIMIT), 1000)
+        if servo.get(ft.OPERATING_MODE) == 1:  # wheel mode
+            speed = ft.decode_sign_magnitude(servo.get(ft.GOAL_SPEED), 15)
+            return 0 if speed == 0 else (SLEW_LOAD if speed > 0 else -SLEW_LOAD)
+        error = goal_encoder - servo.encoder
+        if abs(error) <= 1:
+            return min(HOLD_LOAD, limit)
+        sign = 1 if error > 0 else -1
+        if servo.blocked_at is not None:
+            return sign * limit  # pushing against the block at the torque limit
+        return sign * min(SLEW_LOAD, limit)
 
     def _reply(self, servo_id: int, payload: bytes) -> None:
         body = bytes([servo_id, len(payload) + 2, 0]) + payload

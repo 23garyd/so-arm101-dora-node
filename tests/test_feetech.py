@@ -69,3 +69,44 @@ def test_sync_write_reaches_every_listed_servo():
     assert sim.goal(1) == 100
     assert sim.goal(2) == 0
     assert sim.goal(7) == 300
+
+
+def test_load_and_current_decoding():
+    """Present_Load is sign-magnitude with the sign in bit 10; Present_Current is unsigned."""
+
+    class Raw(SimulatedServos):
+        def _refresh_present(self, servo):  # keep the registers exactly as the test set them
+            pass
+
+    sim = Raw([2])
+    bus = ft.FeetechBus(sim)
+    sim.servos[2].set(ft.PRESENT_LOAD, 0x400 | 300)  # bit 10 set: -300 (-30 %)
+    sim.servos[2].set(ft.PRESENT_CURRENT, 154)
+    assert bus.read_load(2) == -300
+    assert bus.read_current(2) == 154
+    sim.servos[2].set(ft.PRESENT_LOAD, 1000)
+    assert bus.read_load(2) == 1000
+    assert ft.PRESENT_LOAD == (60, 2) and ft.PRESENT_CURRENT == (69, 2)  # LeRobot feetech/tables.py
+
+
+def test_simulated_load_follows_torque_motion_and_stall():
+    t = [0.0]
+    sim = SimulatedServos([1], clock=lambda: t[0], slew_ticks_per_s=1000)
+    bus = ft.FeetechBus(sim)
+    assert bus.read_load(1) == 0 and bus.read_current(1) == 0  # torque off: limp
+
+    bus.write(1, ft.TORQUE_ENABLE, 1)
+    bus.write(1, ft.GOAL_POSITION, 2048)
+    assert 0 < bus.read_load(1) <= 50  # holding still: small load
+
+    bus.write(1, ft.GOAL_POSITION, 2548)  # slewing upward
+    assert 100 <= bus.read_load(1) < 500
+    bus.write(1, ft.GOAL_POSITION, 1548)  # and downward: the sign flips
+    assert -500 < bus.read_load(1) <= -100
+
+    sim.block(1)  # stalled against something while still commanded to move
+    t[0] += 5.0
+    assert bus.read_load(1) == -1000  # pushing at the torque limit
+    assert bus.read_current(1) > 300
+    bus.write(1, ft.MAX_TORQUE_LIMIT, 500)
+    assert bus.read_load(1) == -500  # capped by the configured limit

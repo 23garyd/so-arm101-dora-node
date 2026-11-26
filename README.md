@@ -20,7 +20,7 @@ line later.
 | `robot.get_capabilities` | observe | The capabilities advert |
 | `robot.estop` | emergency_override | Cancel motion and hold the pose (`ESTOP_ACTION=torque_off` drops torque instead); latches |
 | `vendor.lerobot.so101.stop` | emergency_override | Cancel motion and hold, without latching |
-| `vendor.lerobot.so101.get_joint_state` | observe | Joint positions, torque and motion state |
+| `vendor.lerobot.so101.get_joint_state` | observe | Joint positions, torque and motion state; per-joint `load` (signed % of max torque) and `current_ma` (`null` on the AISLE backend) |
 | `vendor.lerobot.so101.clear_estop` | safe_motion | Allow motion again after an estop |
 | `vendor.lerobot.so101.enable_torque` | safe_motion | Energise and hold the current pose (never jumps) |
 | `vendor.lerobot.so101.disable_torque` | safe_motion | Go limp; refused unless near the rest pose (`force=true` overrides) |

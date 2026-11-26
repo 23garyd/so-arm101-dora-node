@@ -115,6 +115,26 @@ def test_gripper_blocked_by_object_still_succeeds(rig, clock):
     assert r["ok"] and r["data"]["gripper_blocked"] is True
 
 
+def test_joint_state_reports_load_and_a_held_object(rig, clock):
+    controller, sim = rig
+    state = run(controller, clock, f"{NS}.get_joint_state")["data"]["arms"]["left"]
+    assert set(state["load"]) == set(state["joints"]) == set(state["current_ma"])
+    assert all(v == 0 for v in state["load"].values())  # torque off
+
+    run(controller, clock, f"{NS}.enable_torque")
+    run(controller, clock, f"{NS}.gripper.open")
+    free = run(controller, clock, f"{NS}.get_joint_state")["data"]["arms"]["left"]
+    assert 0 < free["load"]["gripper"] < 10  # holding open, nothing in the jaws
+
+    sim.block(6)  # an object between the jaws
+    assert run(controller, clock, f"{NS}.gripper.close")["data"]["gripper_blocked"] is True
+    held = run(controller, clock, f"{NS}.get_joint_state")["data"]["arms"]["left"]
+    # configure() caps the gripper at 50 % torque; a held object pushes it to that cap
+    assert abs(held["load"]["gripper"]) == pytest.approx(50.0)
+    assert held["current_ma"]["gripper"] > 5 * free["current_ma"]["gripper"]
+    assert abs(held["load"]["shoulder_pan"]) < 10  # other joints just hold
+
+
 def test_estop_cancels_motion_and_latches(rig, clock):
     controller, sim = rig
     run(controller, clock, f"{NS}.enable_torque")
