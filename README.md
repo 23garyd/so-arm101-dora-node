@@ -88,7 +88,14 @@ plugin (rule R5):
   - **Base:** a failed stop (the stop verb, the end of a timed move, a zero
     velocity, an estop, or a start that failed partway) is reported as
     `HARDWARE_ERROR` and retried on every tick until it succeeds. Meanwhile the
-    state stream shows the base as moving with its last commanded wheel speeds.
+    state stream shows the base as moving with its last commanded wheel speeds,
+    and a non-zero `set_velocity` is refused (a zero velocity, being a stop, is
+    accepted).
+  - **Unconfirmed hold:** when an arm's hold write fails (a stop, an estop, or
+    a move ended by a bus error), the hold is retried on every tick. Until it
+    succeeds, `get_joint_state` and the state stream report the arm as `moving`
+    with `hold_confirmed: false`, and new moves and plans for that arm are
+    refused. A `hold_confirmed` safety event marks the recovery.
   - **Serial faults:** pyserial errors are reported as bus errors (`HARDWARE_ERROR`)
     instead of stopping the node.
 

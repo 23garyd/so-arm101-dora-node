@@ -6,6 +6,7 @@ A fault-injecting port fails chosen writes the way a dropped USB-serial link doe
 
 from __future__ import annotations
 
+import pytest
 import serial
 
 from so_arm101_node import feetech as ft
@@ -185,3 +186,76 @@ def test_estop_base_stop_failure_is_reported_and_retried(clock):
     port.recover()
     _tick(controller, clock, 0.06)
     assert speeds(sim) == (0, 0, 0)
+
+
+# ---------------------------------------------------------------- review round 2
+
+
+def test_drive_is_refused_while_a_base_stop_is_pending(clock):
+    """A partial stop leaves some wheels powered; a new drive must not run on them."""
+    controller, sim = make_nano(clock)
+    controller.handle(req(f"{BASE_NS}.set_velocity", vx=0.02, duration_s=5.0))
+    port = faulty(controller, sim)
+    port.fail_link([WHEELS[1]])  # stop reaches wheels 1 and 3, not 2
+    assert controller.handle(req(f"{BASE_NS}.stop"))["code"] == "HARDWARE_ERROR"
+    port.recover()
+    r = controller.handle(req(f"{BASE_NS}.set_velocity", omega=0.1))  # before the retry ran
+    assert r["ok"] is False and r["code"] == "HARDWARE_ERROR" and "pending" in r["msg"]
+    assert controller.state_payload()["base"]["moving"] is True
+    _tick(controller, clock, 0.04)  # the retry stops every wheel
+    assert speeds(sim) == (0, 0, 0)
+    r = controller.handle(req(f"{BASE_NS}.set_velocity", omega=0.1))
+    assert r["ok"] and all(sim.torque(i) for i in WHEELS) and all(s != 0 for s in speeds(sim))
+
+
+def test_zero_velocity_is_allowed_while_a_base_stop_is_pending(clock):
+    controller, sim = make_nano(clock)
+    controller.handle(req(f"{BASE_NS}.set_velocity", vx=0.02, duration_s=5.0))
+    port = faulty(controller, sim)
+    port.fail_link(WHEELS)
+    controller.handle(req(f"{BASE_NS}.stop"))
+    port.recover()
+    assert controller.handle(req(f"{BASE_NS}.set_velocity", vx=0, vy=0, omega=0))["ok"]
+    assert speeds(sim) == (0, 0, 0) and controller.state_payload()["base"]["moving"] is False
+
+
+def _arm_moving(controller, clock):
+    state = run(controller, clock, f"{NS}.get_joint_state")["data"]["arms"]["left"]
+    return state["moving"], state["hold_confirmed"], controller.state_payload()["arms"]["left"]["moving"]
+
+
+def test_an_unconfirmed_hold_is_published_and_retried(clock):
+    controller, sim = make_rig(clock)
+    run(controller, clock, f"{NS}.enable_torque")
+    controller.handle(req(f"{NS}.move_to_joint_state", joints={"shoulder_pan": 60.0}))
+    _tick(controller, clock, 0.2)
+    port = faulty(controller, sim)
+    port.fail(ft.GOAL_POSITION[0], instruction=ft.INSTR_SYNC_WRITE)
+    assert controller.handle(req(f"{NS}.stop"))["code"] == "HARDWARE_ERROR"
+    assert _arm_moving(controller, clock) == (True, False, True)  # not shown as stationary
+    r = controller.handle(req(f"{NS}.move_to_joint_state", joints={"shoulder_pan": 10.0}))
+    assert r["code"] == "HARDWARE_ERROR" and "hold" in r["msg"]  # no new motion meanwhile
+    assert controller.handle(req(f"{NS}.plan_joint_state", joints={"shoulder_pan": 10.0}))["ok"] is False
+    port.recover()
+    events, _ = _tick(controller, clock, 0.04)  # the hold is retried and confirmed
+    assert any(e["kind"] == "hold_confirmed" and e["arm"] == "left" for e in events)
+    held = controller.arms["left"].read_joints()["shoulder_pan"]
+    _tick(controller, clock, 1.0)
+    assert controller.arms["left"].read_joints()["shoulder_pan"] == pytest.approx(held, abs=1.0)
+    assert _arm_moving(controller, clock) == (False, True, False)
+
+
+def test_a_bus_error_during_a_move_leaves_an_unconfirmed_hold(clock):
+    controller, sim = make_rig(clock)
+    run(controller, clock, f"{NS}.enable_torque")
+    controller.handle(req(f"{NS}.move_to_joint_state", joints={"shoulder_pan": 60.0}))
+    _tick(controller, clock, 0.1)
+    port = faulty(controller, sim)
+    port.fail(ft.GOAL_POSITION[0], instruction=ft.INSTR_SYNC_WRITE)
+    _tick(controller, clock, 0.04)  # the move's goal write fails: the move ends
+    assert controller._motions == {}
+    assert _arm_moving(controller, clock)[1] is False
+    port.recover()
+    _tick(controller, clock, 0.04)
+    assert _arm_moving(controller, clock) == (False, True, False)
+

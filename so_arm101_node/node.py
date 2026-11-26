@@ -146,6 +146,7 @@ class So101Controller:
         self.tcp_floor_m = tcp_floor_m
         self._base_cmd: _BaseCommand | None = None
         self._base_stop_pending = False  # a base stop failed; tick() retries it
+        self._hold_pending: dict[str, str] = {}  # arm -> error of a hold write that failed
         self.robot_id = robot_id
         self.limits = limits or Limits()
         self.named_poses = {"rest": dict(rest or DEFAULT_REST), "home": dict(home or DEFAULT_HOME)}
@@ -262,7 +263,8 @@ class So101Controller:
             data[name] = {
                 "joints": joints,
                 "torque": self._torque[name],
-                "moving": name in self._motions,
+                "moving": self._arm_moving(name),
+                "hold_confirmed": name not in self._hold_pending,
                 "load": effort["load"] if effort else None,
                 "current_ma": effort["current_ma"] if effort else None,
             }
@@ -331,6 +333,7 @@ class So101Controller:
         for name in names:
             self.arms[name].disable_torque()
             self._torque[name] = False
+            self._hold_pending.pop(name, None)
         return self._ok(request, {"limp": names})
 
     def _base_set_velocity(self, request: CmdRequest) -> dict[str, Any] | None:
@@ -356,6 +359,11 @@ class So101Controller:
                 return cmd_response(request, ok=False, code="HARDWARE_ERROR",
                                     msg=f"base stop failed (retrying): {stop_error}")
             return self._ok(request, {"ticks": [0, 0, 0]})
+        if self._base_stop_pending:
+            # A partial stop can leave some wheels powered and others limp; driving now would run
+            # only some of them. Wait until the retried stop has succeeded.
+            raise _Refusal("HARDWARE_ERROR", "a base stop is still pending (retried every tick); "
+                                             "the base takes no new velocity until it succeeds")
         ticks = wheel_ticks(vx, vy, omega, self.base.config)
         try:
             self.base.drive(ticks)
@@ -366,7 +374,6 @@ class So101Controller:
             stop_error = self._stop_base()
             after = f"; the stop also failed and is retried: {stop_error}" if stop_error else "; base stopped"
             return cmd_response(request, ok=False, code="HARDWARE_ERROR", msg=f"base drive failed: {e}{after}")
-        self._base_stop_pending = False
         now = self._clock()
         expires = now + (duration if duration is not None else self.base_command_timeout_s)
         self._base_cmd = _BaseCommand((vx, vy, omega), ticks, expires, request if duration else None)
@@ -410,6 +417,9 @@ class So101Controller:
             blockers.append("ESTOPPED")
         if name in self._motions:
             raise _Refusal("CONTROLLER_BUSY", f"arm {name} is already moving")
+        if name in self._hold_pending:
+            raise _Refusal("HARDWARE_ERROR", f"arm {name}: the last hold write failed and is being "
+                                             f"retried; the arm may still move ({self._hold_pending[name]})")
         if not self._torque[name]:
             if not planning:
                 raise _Refusal("NOT_ENABLED", f"arm {name}: call {NS}.enable_torque first")
@@ -547,11 +557,18 @@ class So101Controller:
                 motion = self._motions.pop(name)
                 result.responses.append(cmd_response(motion.request, ok=False, code="HARDWARE_ERROR", msg=str(e)))
                 result.safety_events.append({"kind": "hardware_error", "arm": name, "detail": str(e)})
+                self._hold_pending.setdefault(name, str(e))  # retried below until it is confirmed
+        for name in list(self._hold_pending):
+            if not self._torque[name]:  # a limp arm needs no hold
+                self._hold_pending.pop(name)
+            elif self._hold(name) is None:
+                result.safety_events.append({"kind": "hold_confirmed", "arm": name})
         result.responses += self._drain_cancelled()
         return result
 
     def _watchdog_due(self, now: float) -> bool:
-        moving = bool(self._motions) or self._base_cmd is not None or self._base_stop_pending
+        moving = (bool(self._motions) or bool(self._hold_pending) or self._base_cmd is not None
+                  or self._base_stop_pending)
         if self.heartbeat_timeout_ms <= 0 or self._watchdog_fired or not moving:
             return False
         return (now - self._last_beat) * 1000 > self.heartbeat_timeout_ms
@@ -609,14 +626,7 @@ class So101Controller:
     def _cancel_motion(self, name: str, code: str, msg: str) -> tuple[bool, str | None]:
         """End the arm's move and hold where it is. Returns (a move was cancelled, hold error)."""
         motion = self._motions.pop(name, None)
-        arm = self.arms[name]
-        hold_error = None
-        if self._torque[name]:
-            try:
-                arm.write_goal(arm.read_joints())
-            except (ArmError, ft.FeetechError) as e:
-                logger.exception("arm %s: hold after cancel failed", name)
-                hold_error = str(e)
+        hold_error = self._hold(name) if self._torque[name] else None
         if motion is not None:
             self._cancelled.append(cmd_response(motion.request, ok=False, code=code, msg=msg))
         return motion is not None, hold_error
@@ -630,7 +640,7 @@ class So101Controller:
         self.estop_reason = reason
         events = []
         for name in self.arms:
-            failed = {}
+            failed: dict[str, str] = {}
             _, hold_error = self._cancel_motion(name, "ESTOPPED", f"estop: {reason}")
             if hold_error:
                 failed["hold"] = hold_error
@@ -638,6 +648,7 @@ class So101Controller:
                 try:
                     self.arms[name].disable_torque()
                     self._torque[name] = False
+                    self._hold_pending.pop(name, None)
                 except (ArmError, ft.FeetechError) as e:  # torque stays reported as on
                     logger.exception("arm %s: torque off during estop failed", name)
                     failed["torque_off"] = str(e)
@@ -650,6 +661,22 @@ class So101Controller:
             events.append({"kind": kind, "part": "base", "reason": reason, "action": "stop",
                            "ok": stop_error is None, "failed": {"stop": stop_error} if stop_error else {}})
         return events
+
+    def _arm_moving(self, name: str) -> bool:
+        """Moving, or not confirmed stationary: a failed hold leaves the last goal in the servos."""
+        return name in self._motions or name in self._hold_pending
+
+    def _hold(self, name: str) -> str | None:
+        """Hold the arm where it is. On failure the hold stays pending (tick() retries it)."""
+        try:
+            arm = self.arms[name]
+            arm.write_goal(arm.read_joints())
+        except (ArmError, ft.FeetechError) as e:
+            logger.exception("arm %s: hold failed; retrying on every tick", name)
+            self._hold_pending[name] = str(e)
+            return str(e)
+        self._hold_pending.pop(name, None)
+        return None
 
     def _stop_base(self) -> str | None:
         """Stop the base. On failure keep the stop pending so tick() retries it; return the error."""
@@ -668,6 +695,7 @@ class So101Controller:
         for name in list(self._motions):
             motion = self._motions.pop(name)
             self._cancelled.append(cmd_response(motion.request, ok=False, code="PREEMPTED", msg=reason))
+        self._hold_pending.clear()  # the scene was reset; there is no previous goal to stop
         for name, arm in self.arms.items():
             hook = getattr(arm, "on_reset", None)
             if callable(hook):
@@ -702,7 +730,8 @@ class So101Controller:
             arms[name] = {
                 "joints": self._last_joints.get(name, {}),
                 "torque": self._torque[name],
-                "moving": name in self._motions,
+                "moving": self._arm_moving(name),
+                "hold_confirmed": name not in self._hold_pending,
             }
         state: dict[str, Any] = {"arms": arms, "estopped": self.estopped, "estop_reason": self.estop_reason}
         if self.base is not None:
