@@ -114,3 +114,47 @@ def test_simulated_load_follows_torque_motion_and_stall():
     assert bus.read_current(1) < -300  # current carries the drive direction too
     bus.write(1, ft.MAX_TORQUE_LIMIT, 500)
     assert bus.read_load(1) == -500  # capped by the configured limit
+
+
+class _BrokenPort:
+    """A transport whose USB-serial link has gone: every call raises like pyserial does."""
+
+    def __init__(self, fail_on=("write", "read", "reset_input_buffer")):
+        import serial
+
+        self.exc = serial.SerialException("device reports readiness to read but returned no data")
+        self.fail_on = set(fail_on)
+
+    def _maybe_fail(self, op):
+        if op in self.fail_on:
+            raise self.exc
+
+    def write(self, data):
+        self._maybe_fail("write")
+        return len(data)
+
+    def read(self, size):
+        self._maybe_fail("read")
+        return b""
+
+    def reset_input_buffer(self):
+        self._maybe_fail("reset_input_buffer")
+
+
+@pytest.mark.parametrize("fail_on", [("write",), ("read",), ("reset_input_buffer",)])
+def test_transport_errors_become_feetech_errors(fail_on):
+    """pyserial's SerialException is an OSError, not a FeetechError; the bus must convert it so
+    every caller's FeetechError handling (HARDWARE_ERROR, safety events) applies."""
+    import serial
+
+    bus = ft.FeetechBus(_BrokenPort(fail_on))
+    with pytest.raises(ft.FeetechError, match="transport error") as info:
+        bus.read_position(1)
+    assert isinstance(info.value.__cause__, serial.SerialException)
+    assert bus.ping(1) is False  # ping reports a dead link instead of raising
+
+
+def test_sync_write_transport_error_becomes_feetech_error():
+    bus = ft.FeetechBus(_BrokenPort(("write",)))
+    with pytest.raises(ft.FeetechError, match="transport error"):
+        bus.sync_write(ft.GOAL_POSITION, {1: 2048, 2: 2048})

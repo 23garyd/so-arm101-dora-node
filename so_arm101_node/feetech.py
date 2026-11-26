@@ -123,7 +123,10 @@ class FeetechBus:
 
     Every unicast exchange checks the status packet's header, id, length, checksum
     and error byte, so a wrong or silent servo raises ``FeetechError`` instead of
-    being mistaken for success.
+    being mistaken for success. Errors from the serial transport itself (a USB
+    adapter unplugged, an I/O error: pyserial raises ``SerialException``, an
+    ``OSError``) are raised as ``FeetechError`` too, so every caller's bus-error
+    handling applies and nothing escapes the node's event loop.
     """
 
     def __init__(self, transport: Transport, *, retries: int = 1) -> None:
@@ -153,13 +156,17 @@ class FeetechBus:
                     raise
                 last = e
                 time.sleep(0.002)
-        raise FeetechError(str(last))
+        assert last is not None
+        raise last  # the last attempt's error, with its cause (e.g. the SerialException) kept
 
     def _exchange_once(self, servo_id: int, instruction: int, params: bytes, reply_len: int) -> bytes:
-        self._io.reset_input_buffer()
-        self._io.write(build_packet(servo_id, instruction, params))
         expected = reply_len + 6
-        status = self._io.read(expected)
+        try:
+            self._io.reset_input_buffer()
+            self._io.write(build_packet(servo_id, instruction, params))
+            status = self._io.read(expected)
+        except OSError as e:  # pyserial's SerialException is an OSError
+            raise FeetechError(f"servo {servo_id}: transport error: {e}") from e
         if len(status) != expected:
             raise FeetechError(f"servo {servo_id}: no reply ({len(status)}/{expected} bytes)")
         if status[0:2] != b"\xff\xff" or status[2] != servo_id or status[3] != reply_len + 2:
@@ -198,7 +205,10 @@ class FeetechBus:
         for servo_id, value in values.items():
             params.append(servo_id)
             params += _to_bytes(value, size)
-        self._io.write(build_packet(BROADCAST_ID, INSTR_SYNC_WRITE, bytes(params)))
+        try:
+            self._io.write(build_packet(BROADCAST_ID, INSTR_SYNC_WRITE, bytes(params)))
+        except OSError as e:  # pyserial's SerialException is an OSError
+            raise FeetechError(f"sync write to {sorted(values)}: transport error: {e}") from e
 
     def read_position(self, servo_id: int) -> int:
         return decode_sign_magnitude(self.read(servo_id, PRESENT_POSITION), 15)
