@@ -18,8 +18,8 @@ Safety behaviour:
   instead of pushing on toward the goal.
 - A move whose gripper TCP would dip below the floor (``TCP_Z_FLOOR_M``, forward
   kinematics on the official URDF) is refused before anything moves.
-- ``dry_run: true`` on ``move_to_joint_state`` / ``move_to_named`` runs the same
-  checks and plans the move without writing anything to the servos.
+- ``plan_joint_state`` / ``plan_named`` run the same checks as ``move_to_joint_state`` /
+  ``move_to_named`` and return the plan; they never queue a move or write to the servos.
 """
 
 from __future__ import annotations
@@ -67,6 +67,8 @@ VERB_TIERS: dict[str, str] = {
     f"{NS}.disable_torque": "safe_motion",
     f"{NS}.move_to_joint_state": "safe_motion",
     f"{NS}.move_to_named": "safe_motion",
+    f"{NS}.plan_joint_state": "observe",
+    f"{NS}.plan_named": "observe",
     f"{NS}.gripper.set": "safe_motion",
     f"{NS}.gripper.open": "safe_motion",
     f"{NS}.gripper.close": "safe_motion",
@@ -169,6 +171,8 @@ class So101Controller:
             f"{NS}.disable_torque": self._disable_torque,
             f"{NS}.move_to_joint_state": self._move_to_joint_state,
             f"{NS}.move_to_named": self._move_to_named,
+            f"{NS}.plan_joint_state": self._plan_joint_state,
+            f"{NS}.plan_named": self._plan_named,
             f"{NS}.gripper.set": self._gripper_set,
             f"{NS}.gripper.open": lambda r: self._gripper_to(r, GRIPPER_OPEN),
             f"{NS}.gripper.close": lambda r: self._gripper_to(r, GRIPPER_CLOSED),
@@ -350,24 +354,24 @@ class So101Controller:
         if self.estopped:
             raise _Refusal("ESTOPPED", f"estopped ({self.estop_reason}); call {NS}.clear_estop first")
 
-    def _start_motion(self, request: CmdRequest, name: str, target: dict[str, float],
-                      speed: float | None = None, *, dry_run: bool = False) -> dict[str, Any] | None:
-        """Validate, plan and start a move; with ``dry_run``, validate and plan only.
+    def _check_and_plan(self, name: str, target: dict[str, float], speed: float | None,
+                        *, planning: bool) -> tuple[dict[str, float], Trajectory, list[str]]:
+        """The validation and planning shared by the move verbs and the plan verbs.
 
-        A dry run never writes to the servos. It still plans when the arm is estopped
-        or limp and lists those as ``blockers`` (the real move would be refused), so a
-        move can be checked before torque is enabled. It is refused while the arm is
-        moving, because the start pose is not known yet.
+        For a move, an estopped or limp arm is refused. For a plan, those become
+        ``blockers`` and planning goes on, so a move can be checked before torque is
+        enabled. Both are refused while the arm is moving (the start pose is not settled)
+        and both run the same limit and floor checks, so they fail with the same errors.
         """
         blockers = []
         if self.estopped:
-            if not dry_run:
+            if not planning:
                 self._refuse_if_estopped()
             blockers.append("ESTOPPED")
         if name in self._motions:
             raise _Refusal("CONTROLLER_BUSY", f"arm {name} is already moving")
         if not self._torque[name]:
-            if not dry_run:
+            if not planning:
                 raise _Refusal("NOT_ENABLED", f"arm {name}: call {NS}.enable_torque first")
             blockers.append("NOT_ENABLED")
         arm = self.arms[name]
@@ -375,38 +379,43 @@ class So101Controller:
         start = arm.read_joints()
         if self.tcp_floor_m is not None:
             check_tcp_floor(start, target, self.tcp_floor_m, self.named_poses["rest"])
-        now = self._clock()
-        trajectory = Trajectory.plan(start, target, self.limits, now, speed)
-        if dry_run:
-            lowest, at = lowest_tcp(start, target)
-            return self._ok(request, {
-                "dry_run": True,
-                "arm": name,
-                "start": start,
-                "goal": trajectory.goal,
-                "duration_s": round(trajectory.duration_s, 3),
-                "tcp_z_m": {
-                    "start": round(tcp_position(start)[2], 4),
-                    "goal": round(tcp_position(trajectory.goal)[2], 4),
-                    "lowest": round(lowest, 4),
-                    "lowest_at": round(at, 3),
-                },
-                "tcp_floor_m": self.tcp_floor_m,
-                "blockers": blockers,
-            })
+        trajectory = Trajectory.plan(start, target, self.limits, self._clock(), speed)
+        return start, trajectory, blockers
+
+    def _start_motion(self, request: CmdRequest, name: str, target: dict[str, float],
+                      speed: float | None = None) -> None:
+        start, trajectory, _ = self._check_and_plan(name, target, speed, planning=False)
         self._motions[name] = _Motion(request, trajectory, last_command=dict(start))
-        return None
+
+    def _plan(self, request: CmdRequest, name: str, target: dict[str, float],
+              speed: float | None = None) -> dict[str, Any]:
+        """Answer with the plan the matching move would execute; nothing is queued or written."""
+        start, trajectory, blockers = self._check_and_plan(name, target, speed, planning=True)
+        lowest, at = lowest_tcp(start, target)
+        return self._ok(request, {
+            "arm": name,
+            "start": start,
+            "goal": trajectory.goal,
+            "duration_s": round(trajectory.duration_s, 3),
+            "tcp_z_m": {
+                "start": round(tcp_position(start)[2], 4),
+                "goal": round(tcp_position(trajectory.goal)[2], 4),
+                "lowest": round(lowest, 4),
+                "lowest_at": round(at, 3),
+            },
+            "tcp_floor_m": self.tcp_floor_m,
+            "blockers": blockers,
+        })
 
     @staticmethod
-    def _dry_run(request: CmdRequest) -> bool:
-        value = request.params.get("dry_run", False)
-        if not isinstance(value, bool):
-            raise _Refusal("INVALID_PARAMS", "dry_run must be true or false")
-        return value
+    def _refuse_dry_run(request: CmdRequest) -> None:
+        # Never let a planning request turn into a real move by being ignored.
+        if "dry_run" in request.params:
+            raise _Refusal("INVALID_PARAMS",
+                           f"move verbs take no dry_run; use {NS}.plan_joint_state or {NS}.plan_named")
 
-    def _move_to_joint_state(self, request: CmdRequest) -> dict[str, Any] | None:
+    def _joint_target(self, request: CmdRequest) -> tuple[str, dict[str, float], float | None]:
         (name,) = self._arm_names(request, required=True)
-        dry_run = self._dry_run(request)
         joints = request.params.get("joints")
         if isinstance(joints, list):
             if len(joints) not in (len(BODY_JOINTS), len(JOINTS)):
@@ -419,16 +428,37 @@ class So101Controller:
         except (TypeError, ValueError) as e:
             raise _Refusal("INVALID_PARAMS", f"joint values must be numbers: {e}") from e
         speed = request.params.get("speed_deg_s")
-        return self._start_motion(request, name, target, None if speed is None else float(speed),
-                                  dry_run=dry_run)
+        try:
+            return name, target, None if speed is None else float(speed)
+        except (TypeError, ValueError) as e:
+            raise _Refusal("INVALID_PARAMS", f"speed_deg_s must be a number: {e}") from e
 
-    def _move_to_named(self, request: CmdRequest) -> dict[str, Any] | None:
+    def _named_target(self, request: CmdRequest) -> tuple[str, dict[str, float]]:
         (name,) = self._arm_names(request, required=True)
-        dry_run = self._dry_run(request)
         pose = str(request.params.get("name", ""))
         if pose not in self.named_poses:
             raise _Refusal("INVALID_PARAMS", f"unknown pose {pose!r}; available: {sorted(self.named_poses)}")
-        return self._start_motion(request, name, dict(self.named_poses[pose]), dry_run=dry_run)
+        return name, dict(self.named_poses[pose])
+
+    def _move_to_joint_state(self, request: CmdRequest) -> None:
+        self._refuse_dry_run(request)
+        name, target, speed = self._joint_target(request)
+        self._start_motion(request, name, target, speed)
+        return None
+
+    def _move_to_named(self, request: CmdRequest) -> None:
+        self._refuse_dry_run(request)
+        name, target = self._named_target(request)
+        self._start_motion(request, name, target)
+        return None
+
+    def _plan_joint_state(self, request: CmdRequest) -> dict[str, Any]:
+        name, target, speed = self._joint_target(request)
+        return self._plan(request, name, target, speed)
+
+    def _plan_named(self, request: CmdRequest) -> dict[str, Any]:
+        name, target = self._named_target(request)
+        return self._plan(request, name, target)
 
     def _gripper_set(self, request: CmdRequest) -> None:
         try:
