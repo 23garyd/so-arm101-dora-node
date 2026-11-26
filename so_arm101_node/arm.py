@@ -18,6 +18,10 @@ from so_arm101_node.calibration import GRIPPER, JOINTS, MotorCalibration
 
 logger = logging.getLogger(__name__)
 
+# What an optional effort read may fail with: a bad or missing servo reply, or the serial
+# transport itself (pyserial raises SerialException, a subclass of OSError).
+EFFORT_READ_ERRORS = (ft.FeetechError, OSError)
+
 
 class ArmError(RuntimeError):
     pass
@@ -141,18 +145,21 @@ class SoArm101:
 
         Effort is secondary telemetry: a value whose read fails is ``None`` and the other
         values are still returned, so a flaky effort read never hides the joint positions.
+        Failures include protocol errors (``FeetechError``) and transport errors from the
+        serial port (pyserial's ``SerialException`` is an ``OSError``); neither may escape
+        and stop the node after the positions were read.
         """
         load: dict[str, float | None] = {}
         current: dict[str, float | None] = {}
         for j, i in self._id.items():
             try:
                 load[j] = round(self.bus.read_load(i) * ft.LOAD_PERCENT_PER_UNIT, 1)
-            except ft.FeetechError as e:
+            except EFFORT_READ_ERRORS as e:
                 logger.warning("arm %s: %s load read failed: %s", self.name, j, e)
                 load[j] = None
             try:
                 current[j] = round(self.bus.read_current(i) * ft.CURRENT_MA_PER_UNIT, 1)
-            except ft.FeetechError as e:
+            except EFFORT_READ_ERRORS as e:
                 logger.warning("arm %s: %s current read failed: %s", self.name, j, e)
                 current[j] = None
         return {"load": load, "current_ma": current}

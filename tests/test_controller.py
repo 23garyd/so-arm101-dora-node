@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import serial
 
 from so_arm101_node import feetech as ft
 from so_arm101_node._envelope import CmdRequest
@@ -167,6 +168,48 @@ def test_effort_timeout_keeps_joint_positions(rig, clock):
     assert state["joints"] == pytest.approx(expected, abs=0.2)
     assert state["load"]["elbow_flex"] is None and state["current_ma"]["elbow_flex"] is None
     assert state["load"]["shoulder_pan"] is not None and state["current_ma"]["gripper"] is not None
+
+
+class _SerialFailsOnEffort:
+    """Wrap the simulated bus so one servo's effort reads raise like a dropped USB-serial port."""
+
+    def __init__(self, sim, servo_id, registers):
+        self.sim, self.servo_id, self.registers = sim, servo_id, registers
+        self.raised = 0
+
+    def write(self, data):
+        if len(data) > 6 and data[2] == self.servo_id and data[4] == ft.INSTR_READ and data[5] in self.registers:
+            self.raised += 1
+            raise serial.SerialException("device reports readiness to read but returned no data")
+        return self.sim.write(data)
+
+    def read(self, size):
+        return self.sim.read(size)
+
+    def reset_input_buffer(self):
+        self.sim.reset_input_buffer()
+
+
+@pytest.mark.parametrize("registers, failed", [
+    ({ft.PRESENT_CURRENT[0]}, ("current_ma",)),
+    ({ft.PRESENT_LOAD[0]}, ("load",)),
+    ({ft.PRESENT_LOAD[0], ft.PRESENT_CURRENT[0]}, ("load", "current_ma")),
+])
+def test_serial_exception_on_an_effort_read_keeps_the_node_answering(rig, clock, registers, failed):
+    """A transport error (pyserial SerialException, an OSError) on an optional effort read must not
+    escape handle(): positions are kept and only the affected reading becomes null."""
+    controller, sim = rig
+    expected = run(controller, clock, f"{NS}.get_joint_state")["data"]["arms"]["left"]["joints"]
+    flaky = _SerialFailsOnEffort(sim, servo_id=6, registers=registers)  # the gripper servo
+    controller.arms["left"].bus._io = flaky
+    r = controller.handle(req(f"{NS}.get_joint_state"))  # must return, not raise
+    assert flaky.raised > 0
+    assert r["ok"], r
+    state = r["data"]["arms"]["left"]
+    assert state["joints"] == pytest.approx(expected, abs=0.2)  # all six positions still reported
+    for field in ("load", "current_ma"):
+        assert (state[field]["gripper"] is None) == (field in failed)
+        assert state[field]["elbow_flex"] is not None  # other joints unaffected
 
 
 def test_position_read_failure_is_still_a_hardware_error(rig, clock):
