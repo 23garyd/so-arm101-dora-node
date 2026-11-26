@@ -24,8 +24,8 @@ line later.
 | `vendor.lerobot.so101.clear_estop` | safe_motion | Allow motion again after an estop |
 | `vendor.lerobot.so101.enable_torque` | safe_motion | Energise and hold the current pose (never jumps) |
 | `vendor.lerobot.so101.disable_torque` | safe_motion | Go limp; refused unless near the rest pose (`force=true` overrides) |
-| `vendor.lerobot.so101.move_to_joint_state` | safe_motion | Move to joint targets: `{"arm": "left", "joints": {"shoulder_pan": 20}}` |
-| `vendor.lerobot.so101.move_to_named` | safe_motion | `rest` or `home` |
+| `vendor.lerobot.so101.move_to_joint_state` | safe_motion | Move to joint targets: `{"arm": "left", "joints": {"shoulder_pan": 20}}`; `dry_run` (below) |
+| `vendor.lerobot.so101.move_to_named` | safe_motion | `rest` or `home`; `dry_run` (below) |
 | `vendor.lerobot.so101.gripper.set` / `.open` / `.close` | safe_motion | Gripper percent (0 closed, 100 open) |
 
 Units: body joints in **degrees** around the calibrated middle, the gripper in
@@ -34,6 +34,17 @@ verbs need `"arm"`; observation and stop verbs default to every arm.
 
 Motion verbs answer when the move has finished and settled. A gripper that closes
 on an object reports `ok` with `gripper_blocked: true`.
+
+`move_to_joint_state` and `move_to_named` take `"dry_run": true` to check a move
+without making it. The node runs the same limit and floor checks, plans the
+trajectory and answers at once; nothing is written to the servos. The answer
+has the full `goal`, `duration_s`, the gripper TCP height (`tcp_z_m`: `start`,
+`goal`, and the `lowest` point on the path with `lowest_at` as a 0–1 fraction)
+and `blockers`. A dry run also works while the arm is limp or estopped, and
+lists `NOT_ENABLED` / `ESTOPPED` in `blockers` because the real move would be
+refused. A dry run that fails a check returns the same error code and message
+as the real move would. It is refused while the arm is moving
+(`CONTROLLER_BUSY`), since the start pose is not settled.
 
 ### Safety behaviour
 

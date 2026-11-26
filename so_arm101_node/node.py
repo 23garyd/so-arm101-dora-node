@@ -18,6 +18,8 @@ Safety behaviour:
   instead of pushing on toward the goal.
 - A move whose gripper TCP would dip below the floor (``TCP_Z_FLOOR_M``, forward
   kinematics on the official URDF) is refused before anything moves.
+- ``dry_run: true`` on ``move_to_joint_state`` / ``move_to_named`` runs the same
+  checks and plans the move without writing anything to the servos.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from so_arm101_node._envelope import CmdRequest, cmd_response
 from so_arm101_node.arm import Arm, ArmError
 from so_arm101_node.base import BaseError, OmniBase, wheel_ticks
 from so_arm101_node.calibration import BODY_JOINTS, GRIPPER, JOINTS
+from so_arm101_node.kinematics import tcp_position
 from so_arm101_node.motion import (
     DEFAULT_HOME,
     DEFAULT_REST,
@@ -43,6 +46,7 @@ from so_arm101_node.motion import (
     Trajectory,
     check_target,
     check_tcp_floor,
+    lowest_tcp,
 )
 
 logger = logging.getLogger(__name__)
@@ -347,12 +351,25 @@ class So101Controller:
             raise _Refusal("ESTOPPED", f"estopped ({self.estop_reason}); call {NS}.clear_estop first")
 
     def _start_motion(self, request: CmdRequest, name: str, target: dict[str, float],
-                      speed: float | None = None) -> None:
-        self._refuse_if_estopped()
+                      speed: float | None = None, *, dry_run: bool = False) -> dict[str, Any] | None:
+        """Validate, plan and start a move; with ``dry_run``, validate and plan only.
+
+        A dry run never writes to the servos. It still plans when the arm is estopped
+        or limp and lists those as ``blockers`` (the real move would be refused), so a
+        move can be checked before torque is enabled. It is refused while the arm is
+        moving, because the start pose is not known yet.
+        """
+        blockers = []
+        if self.estopped:
+            if not dry_run:
+                self._refuse_if_estopped()
+            blockers.append("ESTOPPED")
         if name in self._motions:
             raise _Refusal("CONTROLLER_BUSY", f"arm {name} is already moving")
         if not self._torque[name]:
-            raise _Refusal("NOT_ENABLED", f"arm {name}: call {NS}.enable_torque first")
+            if not dry_run:
+                raise _Refusal("NOT_ENABLED", f"arm {name}: call {NS}.enable_torque first")
+            blockers.append("NOT_ENABLED")
         arm = self.arms[name]
         check_target(target, arm.bounds(), self.limits, self.named_poses["rest"])
         start = arm.read_joints()
@@ -360,10 +377,36 @@ class So101Controller:
             check_tcp_floor(start, target, self.tcp_floor_m, self.named_poses["rest"])
         now = self._clock()
         trajectory = Trajectory.plan(start, target, self.limits, now, speed)
+        if dry_run:
+            lowest, at = lowest_tcp(start, target)
+            return self._ok(request, {
+                "dry_run": True,
+                "arm": name,
+                "start": start,
+                "goal": trajectory.goal,
+                "duration_s": round(trajectory.duration_s, 3),
+                "tcp_z_m": {
+                    "start": round(tcp_position(start)[2], 4),
+                    "goal": round(tcp_position(trajectory.goal)[2], 4),
+                    "lowest": round(lowest, 4),
+                    "lowest_at": round(at, 3),
+                },
+                "tcp_floor_m": self.tcp_floor_m,
+                "blockers": blockers,
+            })
         self._motions[name] = _Motion(request, trajectory, last_command=dict(start))
+        return None
 
-    def _move_to_joint_state(self, request: CmdRequest) -> None:
+    @staticmethod
+    def _dry_run(request: CmdRequest) -> bool:
+        value = request.params.get("dry_run", False)
+        if not isinstance(value, bool):
+            raise _Refusal("INVALID_PARAMS", "dry_run must be true or false")
+        return value
+
+    def _move_to_joint_state(self, request: CmdRequest) -> dict[str, Any] | None:
         (name,) = self._arm_names(request, required=True)
+        dry_run = self._dry_run(request)
         joints = request.params.get("joints")
         if isinstance(joints, list):
             if len(joints) not in (len(BODY_JOINTS), len(JOINTS)):
@@ -376,16 +419,16 @@ class So101Controller:
         except (TypeError, ValueError) as e:
             raise _Refusal("INVALID_PARAMS", f"joint values must be numbers: {e}") from e
         speed = request.params.get("speed_deg_s")
-        self._start_motion(request, name, target, None if speed is None else float(speed))
-        return None
+        return self._start_motion(request, name, target, None if speed is None else float(speed),
+                                  dry_run=dry_run)
 
-    def _move_to_named(self, request: CmdRequest) -> None:
+    def _move_to_named(self, request: CmdRequest) -> dict[str, Any] | None:
         (name,) = self._arm_names(request, required=True)
+        dry_run = self._dry_run(request)
         pose = str(request.params.get("name", ""))
         if pose not in self.named_poses:
             raise _Refusal("INVALID_PARAMS", f"unknown pose {pose!r}; available: {sorted(self.named_poses)}")
-        self._start_motion(request, name, dict(self.named_poses[pose]))
-        return None
+        return self._start_motion(request, name, dict(self.named_poses[pose]), dry_run=dry_run)
 
     def _gripper_set(self, request: CmdRequest) -> None:
         try:
