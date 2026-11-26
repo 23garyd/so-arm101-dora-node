@@ -135,6 +135,10 @@ class AisleArm:
     def read_joints(self) -> dict[str, float]:
         return from_wire(self.link.state())
 
+    def read_effort(self) -> None:
+        """AISLE publishes joint positions only; there is no effort to report."""
+        return None
+
     def torque_enabled(self) -> bool:
         return self._enabled
 

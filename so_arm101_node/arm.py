@@ -8,12 +8,19 @@ every arm (and later to the base driver).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Protocol
 
 from so_arm101_node import calibration as calib
 from so_arm101_node import feetech as ft
 from so_arm101_node.calibration import GRIPPER, JOINTS, MotorCalibration
+
+logger = logging.getLogger(__name__)
+
+# What an optional effort read may fail with: a bad or missing servo reply, or the serial
+# transport itself (pyserial raises SerialException, a subclass of OSError).
+EFFORT_READ_ERRORS = (ft.FeetechError, OSError)
 
 
 class ArmError(RuntimeError):
@@ -48,6 +55,7 @@ class Arm(Protocol):
     def write_calibration(self) -> None: ...
     def configure(self) -> None: ...
     def read_joints(self) -> dict[str, float]: ...
+    def read_effort(self) -> dict[str, dict[str, float | None]] | None: ...
     def torque_enabled(self) -> bool: ...
     def enable_torque(self) -> dict[str, float]: ...
     def disable_torque(self) -> None: ...
@@ -131,6 +139,30 @@ class SoArm101:
 
     def read_joints(self) -> dict[str, float]:
         return {j: calib.to_user(j, self.cal[j], raw) for j, raw in self.read_raw().items()}
+
+    def read_effort(self) -> dict[str, dict[str, float | None]]:
+        """Per joint: ``load`` (signed motor-drive duty cycle, percent) and signed ``current_ma``.
+
+        Effort is secondary telemetry: a value whose read fails is ``None`` and the other
+        values are still returned, so a flaky effort read never hides the joint positions.
+        Failures include protocol errors (``FeetechError``) and transport errors from the
+        serial port (pyserial's ``SerialException`` is an ``OSError``); neither may escape
+        and stop the node after the positions were read.
+        """
+        load: dict[str, float | None] = {}
+        current: dict[str, float | None] = {}
+        for j, i in self._id.items():
+            try:
+                load[j] = round(self.bus.read_load(i) * ft.LOAD_PERCENT_PER_UNIT, 1)
+            except EFFORT_READ_ERRORS as e:
+                logger.warning("arm %s: %s load read failed: %s", self.name, j, e)
+                load[j] = None
+            try:
+                current[j] = round(self.bus.read_current(i) * ft.CURRENT_MA_PER_UNIT, 1)
+            except EFFORT_READ_ERRORS as e:
+                logger.warning("arm %s: %s current read failed: %s", self.name, j, e)
+                current[j] = None
+        return {"load": load, "current_ma": current}
 
     def torque_enabled(self) -> bool:
         return all(self.bus.read(i, ft.TORQUE_ENABLE) for i in self._id.values())

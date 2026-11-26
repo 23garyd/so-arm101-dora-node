@@ -173,6 +173,12 @@ def test_verbs_drive_the_scene_through_the_contract(rig):
     assert rig.scene.violations == []
 
 
+def test_joint_state_has_no_load_in_aisle(rig):
+    rig.step()
+    state = rig.call(f"{NS}.get_joint_state")["data"]["arms"]
+    assert all(arm["load"] is None and arm["current_ma"] is None for arm in state.values())
+
+
 def test_limit_violations_are_refused_before_reaching_aisle(rig):
     rig.step()
     rig.call(f"{NS}.enable_torque")

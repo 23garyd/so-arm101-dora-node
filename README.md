@@ -20,7 +20,7 @@ line later.
 | `robot.get_capabilities` | observe | The capabilities advert |
 | `robot.estop` | emergency_override | Cancel motion and hold the pose (`ESTOP_ACTION=torque_off` drops torque instead); latches |
 | `vendor.lerobot.so101.stop` | emergency_override | Cancel motion and hold, without latching |
-| `vendor.lerobot.so101.get_joint_state` | observe | Joint positions, torque and motion state |
+| `vendor.lerobot.so101.get_joint_state` | observe | Joint positions, torque and motion state; per-joint effort telemetry `load` and `current_ma` (below) |
 | `vendor.lerobot.so101.clear_estop` | safe_motion | Allow motion again after an estop |
 | `vendor.lerobot.so101.enable_torque` | safe_motion | Energise and hold the current pose (never jumps) |
 | `vendor.lerobot.so101.disable_torque` | safe_motion | Go limp; refused unless near the rest pose (`force=true` overrides) |
@@ -33,6 +33,14 @@ line later.
 Units: body joints in **degrees** around the calibrated middle, the gripper in
 **percent open** (LeRobot `DEGREES` and `RANGE_0_100`). With several arms, motion
 verbs need `"arm"`; observation and stop verbs default to every arm.
+
+`get_joint_state` also reports per-joint effort telemetry from the servos:
+`load` is the signed motor-drive duty cycle in percent (Present_Load, an effort
+proxy, not a torque measurement) and `current_ma` is the signed motor phase
+current in mA (Present_Current × 6.5 mA). Both signs follow the drive direction
+([Feetech STS memory table](https://ftservo.github.io/ftservo-wiki/en/reference/parameter/memory-sts/#24-sram)).
+A value whose read fails is `null` while the joint positions are still returned;
+the AISLE backend has no effort data, so both are `null` there.
 
 Motion verbs answer when the move has finished and settled. A gripper that closes
 on an object reports `ok` with `gripper_blocked: true`.
