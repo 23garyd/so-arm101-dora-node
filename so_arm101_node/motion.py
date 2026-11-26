@@ -79,6 +79,25 @@ DEFAULT_TCP_FLOOR_M = 0.005  # AISLE's workspace floor; set per rig after measur
 TCP_FLOOR_TOLERANCE_M = 0.002
 
 
+def lowest_tcp(
+    start: dict[str, float], goal: dict[str, float], samples: int = 24
+) -> tuple[float, float]:
+    """Lowest gripper TCP height (metres) on the joint-space line from ``start`` to ``goal``,
+    and where it occurs as a fraction of the path (0 = start, 1 = goal).
+
+    ``Trajectory`` eases along this same straight line in joint space, so the sampled
+    heights are the ones the arm passes through.
+    """
+    full_goal = dict(start) | goal
+    lowest, at = tcp_position(start)[2], 0.0
+    for i in range(1, samples + 1):
+        s = i / samples
+        z = tcp_position({j: start[j] + (full_goal[j] - start[j]) * s for j in BODY_JOINTS})[2]
+        if z < lowest:
+            lowest, at = z, s
+    return lowest, at
+
+
 def check_tcp_floor(
     start: dict[str, float],
     goal: dict[str, float],
@@ -98,12 +117,7 @@ def check_tcp_floor(
     limit = min(floor_m, start_z) - TCP_FLOOR_TOLERANCE_M
     if rest is not None and all(abs(full_goal[j] - rest[j]) < 1e-6 for j in BODY_JOINTS):
         limit = min(limit, tcp_position(rest)[2] - TCP_FLOOR_TOLERANCE_M)
-    lowest, at = start_z, 0.0
-    for i in range(1, samples + 1):
-        s = i / samples
-        z = tcp_position({j: start[j] + (full_goal[j] - start[j]) * s for j in BODY_JOINTS})[2]
-        if z < lowest:
-            lowest, at = z, s
+    lowest, at = lowest_tcp(start, goal, samples)
     if lowest < limit:
         where = "at the goal" if at == 1.0 else f"{at:.0%} of the way"
         raise LimitError(

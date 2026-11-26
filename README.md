@@ -26,6 +26,8 @@ line later.
 | `vendor.lerobot.so101.disable_torque` | safe_motion | Go limp; refused unless near the rest pose (`force=true` overrides) |
 | `vendor.lerobot.so101.move_to_joint_state` | safe_motion | Move to joint targets: `{"arm": "left", "joints": {"shoulder_pan": 20}}` |
 | `vendor.lerobot.so101.move_to_named` | safe_motion | `rest` or `home` |
+| `vendor.lerobot.so101.plan_joint_state` | observe | The plan `move_to_joint_state` would execute (same params); never moves |
+| `vendor.lerobot.so101.plan_named` | observe | The plan `move_to_named` would execute (same params); never moves |
 | `vendor.lerobot.so101.gripper.set` / `.open` / `.close` | safe_motion | Gripper percent (0 closed, 100 open) |
 
 Units: body joints in **degrees** around the calibrated middle, the gripper in
@@ -34,6 +36,20 @@ verbs need `"arm"`; observation and stop verbs default to every arm.
 
 Motion verbs answer when the move has finished and settled. A gripper that closes
 on an object reports `ok` with `gripper_blocked: true`.
+
+`plan_joint_state` and `plan_named` take the same parameters as
+`move_to_joint_state` and `move_to_named` and run the same parsing, limit and
+floor checks and the same trajectory planner, then answer at once with the plan.
+They never queue a move or write to a servo. The answer has the full `goal`,
+`duration_s`, the gripper TCP height (`tcp_z_m`: `start`, `goal`, and the
+`lowest` point on the path with `lowest_at` as a 0–1 fraction) and `blockers`.
+They also plan while the arm is limp or estopped and list `NOT_ENABLED` /
+`ESTOPPED` in `blockers`, because the move would be refused for that reason. A
+plan that fails a check returns the same error code and message as the move. A
+plan is refused while the arm is moving (`CONTROLLER_BUSY`), since the start pose
+is not settled. Move verbs refuse a `dry_run` parameter, so a planning request
+sent the wrong way never moves the arm. Clients can check the advert's
+`commands` for `plan_joint_state` to know whether a node supports planning.
 
 ### Safety behaviour
 
